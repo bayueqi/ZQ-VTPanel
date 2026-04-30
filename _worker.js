@@ -1,404 +1,166 @@
 import { connect } from "cloudflare:sockets";
 
 function trojanpwd(s) {
-    const K = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    const r = (n, b) => ((n >>> b) | (n << (32 - b))) >>> 0;
+    const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+    const r = (n,b) => ((n>>>b)|(n<<(32-b)))>>>0;
     s = unescape(encodeURIComponent(s));
-    const l = s.length * 8;
+    const l = s.length*8;
     s += String.fromCharCode(0x80);
-    while ((s.length * 8) % 512 !== 448) {
-        s += String.fromCharCode(0);
+    while((s.length*8)%512!==448) s += String.fromCharCode(0);
+    const h = [0xc1059ed8,0x367cd507,0x3070dd17,0xf70e5939,0xffc00b31,0x68581511,0x64f98fa7,0xbefa4fa4];
+    const hi=Math.floor(l/0x100000000),lo=l&0xffffffff;
+    s += String.fromCharCode((hi>>>24)&0xff,(hi>>>16)&0xff,(hi>>>8)&0xff,hi&0xff,(lo>>>24)&0xff,(lo>>>16)&0xff,(lo>>>8)&0xff,lo&0xff);
+    const w=[];
+    for(let i=0;i<s.length;i+=4) w.push((s.charCodeAt(i)<<24)|(s.charCodeAt(i+1)<<16)|(s.charCodeAt(i+2)<<8)|s.charCodeAt(i+3));
+    for(let i=0;i<w.length;i+=16){
+        const x=new Array(64).fill(0);
+        for(let j=0;j<16;j++) x[j]=w[i+j];
+        for(let j=16;j<64;j++){
+            const s0=r(x[j-15],7)^r(x[j-15],18)^(x[j-15]>>>3);
+            const s1=r(x[j-2],17)^r(x[j-2],19)^(x[j-2]>>>10);
+            x[j]=(x[j-16]+s0+x[j-7]+s1)>>>0;
+        }
+        let [a,b,c,d,e,f,g,h0]=h;
+        for(let j=0;j<64;j++){
+            const S1=r(e,6)^r(e,11)^r(e,25);
+            const ch=(e&f)^(~e&g);
+            const t1=(h0+S1+ch+K[j]+x[j])>>>0;
+            const S0=r(a,2)^r(a,13)^r(a,22);
+            const maj=(a&b)^(a&c)^(b&c);
+            const t2=(S0+maj)>>>0;
+            h0=g;g=f;f=e;e=(d+t1)>>>0;d=c;c=b;b=a;a=(t1+t2)>>>0;
+        }
+        for(let j=0;j<8;j++) h[j]=(h[j]+[a,b,c,d,e,f,g,h0][j])>>>0;
     }
-    const h = [
-        0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7,
-        0xbefa4fa4,
-    ];
-    const hi = Math.floor(l / 0x100000000);
-    const lo = l & 0xffffffff;
-    s += String.fromCharCode(
-        (hi >>> 24) & 0xff,
-        (hi >>> 16) & 0xff,
-        (hi >>> 8) & 0xff,
-        hi & 0xff,
-        (lo >>> 24) & 0xff,
-        (lo >>> 16) & 0xff,
-        (lo >>> 8) & 0xff,
-        lo & 0xff,
-    );
-    const w = [];
-    for (let i = 0; i < s.length; i += 4) {
-        w.push(
-            (s.charCodeAt(i) << 24) |
-                (s.charCodeAt(i + 1) << 16) |
-                (s.charCodeAt(i + 2) << 8) |
-                s.charCodeAt(i + 3),
-        );
-    }
-    for (let i = 0; i < w.length; i += 16) {
-        const x = new Array(64).fill(0);
-        for (let j = 0; j < 16; j++) {
-            x[j] = w[i + j];
-        }
-        for (let j = 16; j < 64; j++) {
-            const s0 = r(x[j - 15], 7) ^ r(x[j - 15], 18) ^ (x[j - 15] >>> 3);
-            const s1 = r(x[j - 2], 17) ^ r(x[j - 2], 19) ^ (x[j - 2] >>> 10);
-            x[j] = (x[j - 16] + s0 + x[j - 7] + s1) >>> 0;
-        }
-        let [a, b, c, d, e, f, g, h0] = h;
-        for (let j = 0; j < 64; j++) {
-            const S1 = r(e, 6) ^ r(e, 11) ^ r(e, 25);
-            const ch = (e & f) ^ (~e & g);
-            const t1 = (h0 + S1 + ch + K[j] + x[j]) >>> 0;
-            const S0 = r(a, 2) ^ r(a, 13) ^ r(a, 22);
-            const maj = (a & b) ^ (a & c) ^ (b & c);
-            const t2 = (S0 + maj) >>> 0;
-            h0 = g;
-            g = f;
-            f = e;
-            e = (d + t1) >>> 0;
-            d = c;
-            c = b;
-            b = a;
-            a = (t1 + t2) >>> 0;
-        }
-        for (let j = 0; j < 8; j++) {
-            h[j] = (h[j] + [a, b, c, d, e, f, g, h0][j]) >>> 0;
-        }
-    }
-    let hex = "";
-    for (let i = 0; i < 7; i++) {
-        for (let j = 24; j >= 0; j -= 8) {
-            hex += ((h[i] >>> j) & 0xff).toString(16).padStart(2, "0");
-        }
-    }
+    let hex="";
+    for(let i=0;i<7;i++) for(let j=24;j>=0;j-=8) hex += ((h[i]>>>j)&0xff).toString(16).padStart(2,"0");
     return hex;
 }
 
-function parseTrojanRequest(buffer, pwd) {
-    const p = trojanpwd(pwd);
-    if (buffer.byteLength < 56) {
-        return { hasError: true, message: "invalid data" };
-    }
-    const b = new Uint8Array(buffer);
-    if (b[56] !== 0x0d || b[57] !== 0x0a) {
-        return { hasError: true, message: "invalid header" };
-    }
-    if (new TextDecoder().decode(buffer.slice(0, 56)) !== p) {
-        return { hasError: true, message: "invalid password" };
-    }
-    const s5buf = buffer.slice(58);
-    if (s5buf.byteLength < 6) {
-        return { hasError: true, message: "invalid S5 data" };
-    }
-    const v = new DataView(s5buf);
-    const cmd = v.getUint8(0);
-    if (cmd !== 1 && cmd !== 3) {
-        return { hasError: true, message: "unsupported cmd" };
-    }
-    const at = v.getUint8(1);
-    const isUDP = cmd === 3;
-    let addr = "";
-    let ai = 2;
-    let al = 0;
-    if (at === 1) {
-        al = 4;
-        addr = new Uint8Array(s5buf.slice(ai, ai + al)).join(".");
-    } else if (at === 3) {
-        al = v.getUint8(ai);
+function parseTrojanRequest(buffer,pwd){
+    const p=trojanpwd(pwd);
+    if(buffer.byteLength<56) return {hasError:true,message:"invalid data"};
+    const b=new Uint8Array(buffer);
+    if(b[56]!==0x0d||b[57]!==0x0a) return {hasError:true,message:"invalid header"};
+    if(new TextDecoder().decode(buffer.slice(0,56))!==p) return {hasError:true,message:"invalid password"};
+    const s5buf=buffer.slice(58);
+    if(s5buf.byteLength<6) return {hasError:true,message:"invalid S5 data"};
+    const v=new DataView(s5buf);
+    const cmd=v.getUint8(0);
+    if(cmd!==1&&cmd!==3) return {hasError:true,message:"unsupported cmd"};
+    const at=v.getUint8(1);
+    const isUDP=cmd===3;
+    let addr="",ai=2,al=0;
+    if(at===1){
+        al=4;
+        addr=new Uint8Array(s5buf.slice(ai,ai+al)).join(".");
+    }else if(at===3){
+        al=v.getUint8(ai);
         ai++;
-        addr = new TextDecoder().decode(s5buf.slice(ai, ai + al));
-    } else if (at === 4) {
-        al = 16;
-        const dv = new DataView(s5buf.slice(ai, ai + al));
-        const ip6 = [];
-        for (let i = 0; i < 8; i++) {
-            ip6.push(dv.getUint16(i * 2).toString(16));
-        }
-        addr = ip6.join(":");
-    } else {
-        return { hasError: true, message: "invalid atype" };
-    }
-    if (!addr) {
-        return { hasError: true, message: "empty addr" };
-    }
-    const pi = ai + al;
-    const port = v.getUint16(pi);
-    return {
-        hasError: false,
-        addressType: at,
-        port: port,
-        hostname: addr,
-        isUDP: isUDP,
-        rawClientData: s5buf.slice(pi + 4),
-    };
+        addr=new TextDecoder().decode(s5buf.slice(ai,ai+al));
+    }else if(at===4){
+        al=16;
+        const dv=new DataView(s5buf.slice(ai,ai+al));
+        const ip6=[];
+        for(let i=0;i<8;i++) ip6.push(dv.getUint16(i*2).toString(16));
+        addr=ip6.join(":");
+    }else return {hasError:true,message:"invalid atype"};
+    if(!addr) return {hasError:true,message:"empty addr"};
+    const pi=ai+al,port=v.getUint16(pi);
+    return {hasError:false,addressType:at,port:port,hostname:addr,isUDP:isUDP,rawClientData:s5buf.slice(pi+4)};
 }
 
-const text = (c, s = 200) =>
-    new Response(c, { status: s, headers: { "content-type": "text/plain; charset=utf-8" } });
-const json = (c, s = 200) =>
-    new Response(JSON.stringify(c), {
-        status: s,
-        headers: { "content-type": "application/json; charset=utf-8" },
-    });
-const b64e = (s) => {
-    const e = new TextEncoder(),
-        b = e.encode(s);
-    return btoa(String.fromCharCode(...new Uint8Array(b)));
-};
-const randStr = () => Math.random().toString(36).slice(2, 8);
-const paths = [
-    "/static/js",
-    "/assets/img",
-    "/api/2024",
-    "/cdn/file",
-    "/upload/data",
-    "/media/v2",
-    "/lib/ext",
-    "/res/now",
-    "/stat/click",
-    "/track/log",
-    "/api/v1/data",
-    "/css/main",
-    "/js/app",
-    "/fonts/google",
-    "/images/hero",
-    "/videos/intro",
-    "/api/v2/user",
-    "/assets/css",
-    "/static/media",
-    "/build/js",
-    "/dist/css",
-    "/public/img",
-    "/content/data",
-    "/files/doc",
-    "/download/pkg",
-    "/api/v3/item",
-    "/resource/img",
-];
-const paramsMap = {
-    t: ["m", "type", "mode"],
-    d: ["dir", "direct", "d"],
-    s: ["socks", "proxy", "s"],
-    p: ["ip", "proxyip", "p"],
-    v: ["r", "rand", "v", "id", "t"],
-};
-const getPath = () => paths[Math.floor(Math.random() * paths.length)];
-const getParam = (key) => paramsMap[key][Math.floor(Math.random() * paramsMap[key].length)];
+const text=(c,s=200)=>new Response(c,{status:s,headers:{"content-type":"text/plain; charset=utf-8"}});
+const json=(c,s=200)=>new Response(JSON.stringify(c),{status:s,headers:{"content-type":"application/json; charset=utf-8"}});
+const b64e=(s)=>{const e=new TextEncoder(),b=e.encode(s);return btoa(String.fromCharCode(...new Uint8Array(b)));};
+const randStr=()=>Math.random().toString(36).slice(2,8);
+const paths=["/static/js","/assets/img","/api/2024","/cdn/file","/upload/data","/media/v2","/lib/ext","/res/now","/stat/click","/track/log","/api/v1/data","/css/main","/js/app","/fonts/google","/images/hero","/videos/intro","/api/v2/user","/assets/css","/static/media","/build/js","/dist/css","/public/img","/content/data","/files/doc","/download/pkg","/api/v3/item","/resource/img"];
+const paramsMap={t:["m","type","mode"],d:["dir","direct","d"],s:["socks","proxy","s"],p:["ip","proxyip","p"],v:["r","rand","v","id","t"]};
+const getPath=()=>paths[Math.floor(Math.random()*paths.length)];
+const getParam=(key)=>paramsMap[key][Math.floor(Math.random()*paramsMap[key].length)];
 
-function parseProxyAddress(proxyStr) {
-    if (!proxyStr) return null;
-    proxyStr = proxyStr.trim();
-    if (proxyStr.startsWith("socks://") || proxyStr.startsWith("socks5://")) {
-        try {
-            const url = new URL(proxyStr.replace(/^socks:\/\//, "socks5://"));
-            if (!url.port) return null;
-            return {
-                type: "socks5",
-                host: url.hostname,
-                port: +url.port,
-                username: url.username ? decodeURIComponent(url.username) : "",
-                password: url.password ? decodeURIComponent(url.password) : "",
-            };
-        } catch {
-            return null;
-        }
+function parseProxyAddress(proxyStr){
+    if(!proxyStr) return null;
+    proxyStr=proxyStr.trim();
+    if(proxyStr.startsWith("socks://")||proxyStr.startsWith("socks5://")){
+        try{
+            const url=new URL(proxyStr.replace(/^socks:\/\//,"socks5://"));
+            if(!url.port) return null;
+            return {type:"socks5",host:url.hostname,port:+url.port,username:url.username?decodeURIComponent(url.username):"",password:url.password?decodeURIComponent(url.password):""};
+        }catch{return null;}
     }
-    if (proxyStr.includes("@")) {
-        const [cred, server] = proxyStr.split("@"),
-            [user, pass] = cred.split(":"),
-            [host, port] = server.split(":");
-        if (host && port)
-            return { type: "socks5", host, port: +port, username: user, password: pass };
-    } else if (proxyStr.includes(":")) {
-        const [host, port] = proxyStr.split(":");
-        if (host && port) return { type: "socks5", host, port: +port, username: "", password: "" };
+    if(proxyStr.includes("@")){
+        const [cred,server]=proxyStr.split("@"),[user,pass]=cred.split(":"),[host,port]=server.split(":");
+        if(host&&port) return {type:"socks5",host,port:+port,username:user,password:pass};
+    }else if(proxyStr.includes(":")){
+        const [host,port]=proxyStr.split(":");
+        if(host&&port) return {type:"socks5",host,port:+port,username:"",password:""};
     }
     return null;
 }
 
-async function socks5Connect(socket, proxyConfig, targetHost, targetPort, timeoutMs) {
-    const writer = socket.writable.getWriter(),
-        reader = socket.readable.getReader();
-    try {
-        const authMethods =
-            proxyConfig.username && proxyConfig.password
-                ? new Uint8Array([0x05, 0x02, 0x00, 0x02])
-                : new Uint8Array([0x05, 0x01, 0x00]);
+async function socks5Connect(socket,proxyConfig,targetHost,targetPort,timeoutMs){
+    const writer=socket.writable.getWriter(),reader=socket.readable.getReader();
+    try{
+        const authMethods=proxyConfig.username&&proxyConfig.password?new Uint8Array([0x05,0x02,0x00,0x02]):new Uint8Array([0x05,0x01,0x00]);
         await writer.write(authMethods);
-        let res = await Promise.race([
-            reader.read(),
-            new Promise((r) => setTimeout(() => r({ timeout: true }), timeoutMs)),
-        ]);
-        if (!res || res.timeout) throw new Error("SOCKS5 timeout");
-        const method = new Uint8Array(res.value)[1];
-        if (method === 0x02) {
-            if (!proxyConfig.username || !proxyConfig.password)
-                throw new Error("SOCKS5 auth required");
-            const uBytes = new TextEncoder().encode(proxyConfig.username),
-                pBytes = new TextEncoder().encode(proxyConfig.password);
-            const auth = new Uint8Array(3 + uBytes.length + pBytes.length);
-            auth[0] = 0x01;
-            auth[1] = uBytes.length;
-            auth.set(uBytes, 2);
-            auth[2 + uBytes.length] = pBytes.length;
-            auth.set(pBytes, 3 + uBytes.length);
+        let res=await Promise.race([reader.read(),new Promise((r)=>setTimeout(()=>r({timeout:true}),timeoutMs))]);
+        if(!res||res.timeout) throw new Error("SOCKS5 timeout");
+        const method=new Uint8Array(res.value)[1];
+        if(method===0x02){
+            if(!proxyConfig.username||!proxyConfig.password) throw new Error("SOCKS5 auth required");
+            const uBytes=new TextEncoder().encode(proxyConfig.username),pBytes=new TextEncoder().encode(proxyConfig.password);
+            const auth=new Uint8Array(3+uBytes.length+pBytes.length);
+            auth[0]=0x01;auth[1]=uBytes.length;auth.set(uBytes,2);auth[2+uBytes.length]=pBytes.length;auth.set(pBytes,3+uBytes.length);
             await writer.write(auth);
-            res = await Promise.race([
-                reader.read(),
-                new Promise((r) => setTimeout(() => r({ timeout: true }), timeoutMs)),
-            ]);
-            if (!res || res.timeout || new Uint8Array(res.value)[1] !== 0x00)
-                throw new Error("SOCKS5 auth failed");
-        } else if (method !== 0x00) throw new Error(`SOCKS5 unsupported method: ${method}`);
-        const hostBytes = new TextEncoder().encode(targetHost);
-        const connect = new Uint8Array(7 + hostBytes.length);
-        connect[0] = 0x05;
-        connect[1] = 0x01;
-        connect[2] = 0x00;
-        connect[3] = 0x03;
-        connect[4] = hostBytes.length;
-        connect.set(hostBytes, 5);
-        new DataView(connect.buffer).setUint16(5 + hostBytes.length, targetPort, false);
+            res=await Promise.race([reader.read(),new Promise((r)=>setTimeout(()=>r({timeout:true}),timeoutMs))]);
+            if(!res||res.timeout||new Uint8Array(res.value)[1]!==0x00) throw new Error("SOCKS5 auth failed");
+        }else if(method!==0x00) throw new Error(`SOCKS5 unsupported method: ${method}`);
+        const hostBytes=new TextEncoder().encode(targetHost);
+        const connect=new Uint8Array(7+hostBytes.length);
+        connect[0]=0x05;connect[1]=0x01;connect[2]=0x00;connect[3]=0x03;connect[4]=hostBytes.length;
+        connect.set(hostBytes,5);new DataView(connect.buffer).setUint16(5+hostBytes.length,targetPort,false);
         await writer.write(connect);
-        res = await Promise.race([
-            reader.read(),
-            new Promise((r) => setTimeout(() => r({ timeout: true }), timeoutMs)),
-        ]);
-        if (!res || res.timeout || new Uint8Array(res.value)[1] !== 0x00)
-            throw new Error("SOCKS5 connect failed");
-        return { writer, reader };
-    } catch (e) {
-        writer.releaseLock();
-        reader.releaseLock();
-        throw e;
-    }
+        res=await Promise.race([reader.read(),new Promise((r)=>setTimeout(()=>r({timeout:true}),timeoutMs))]);
+        if(!res||res.timeout||new Uint8Array(res.value)[1]!==0x00) throw new Error("SOCKS5 connect failed");
+        return {writer,reader};
+    }catch(e){writer.releaseLock();reader.releaseLock();throw e;}
 }
 
-const connectDirect = async (hostname, portNum, data) => {
-    const sock = connect({ hostname, port: portNum });
-    await sock.opened;
-    const w = sock.writable.getWriter();
-    await w.write(data);
-    w.releaseLock();
-    return sock;
+const connectDirect=async(hostname,portNum,data)=>{const sock=connect({hostname,port:portNum});await sock.opened;const w=sock.writable.getWriter();await w.write(data);w.releaseLock();return sock;};
+const connectStreams=async(remoteSocket,webSocket,headerData,retryFunc,userCfg)=>{
+    let header=headerData,hasData=false,dataPromiseResolve;
+    const dataPromise=new Promise((resolve)=>(dataPromiseResolve=resolve));
+    const timeoutId=setTimeout(()=>{if(!hasData) dataPromiseResolve(false);},userCfg?.fallbackTimeout||100);
+    remoteSocket.readable.pipeTo(new WritableStream({
+        async write(chunk,controller){
+            clearTimeout(timeoutId);hasData=true;dataPromiseResolve(true);
+            if(webSocket.readyState!==1) controller.error("ws not open");
+            if(header){
+                const response=new Uint8Array(header.length+chunk.byteLength);
+                response.set(header,0);response.set(chunk,header.length);
+                webSocket.send(headerData?response.buffer:chunk);header=null;
+            }else webSocket.send(chunk);
+        },abort(){}
+    })).catch(()=>{try{webSocket.readyState===1&&webSocket.close();}catch{}});
+    const receivedData=await dataPromise;if(!receivedData&&retryFunc) await retryFunc();
 };
 
-const connectStreams = async (remoteSocket, webSocket, headerData, retryFunc, userCfg) => {
-    let header = headerData,
-        hasData = false,
-        dataPromiseResolve;
-    const dataPromise = new Promise((resolve) => (dataPromiseResolve = resolve));
-    const timeoutId = setTimeout(() => {
-        if (!hasData) dataPromiseResolve(false);
-    }, userCfg?.fallbackTimeout || 100);
-    remoteSocket.readable
-        .pipeTo(
-            new WritableStream({
-                async write(chunk, controller) {
-                    clearTimeout(timeoutId);
-                    hasData = true;
-                    dataPromiseResolve(true);
-                    if (webSocket.readyState !== 1) controller.error("ws not open");
-                    if (header) {
-                        const response = new Uint8Array(header.length + chunk.byteLength);
-                        response.set(header, 0);
-                        response.set(chunk, header.length);
-                        webSocket.send(headerData ? response.buffer : chunk);
-                        header = null;
-                    } else {
-                        webSocket.send(chunk);
-                    }
-                },
-                abort() {},
-            }),
-        )
-        .catch(() => {
-            try {
-                webSocket.readyState === 1 && webSocket.close();
-            } catch {}
-        });
-    const receivedData = await dataPromise;
-    if (!receivedData && retryFunc) await retryFunc();
-};
-
-const connectParallel = async (
-    host,
-    port,
-    payload,
-    order,
-    mode,
-    proxyCfg,
-    proxyIp,
-    getOrderFn,
-    tryConnectFn,
-    ws,
-    header,
-    userCfg,
-    remoteVar,
-    setRemote,
-    retryFn,
-) => {
-    const tryConnect = async (type) => {
-        try {
-            if (type === "direct") return await connectDirect(host, port, payload);
-            if (type === "s5" && proxyCfg) return await tryConnectFn(proxyCfg, host, port, payload);
-            if (type === "proxy" && proxyIp) {
-                const [ph, pp = port] = proxyIp.split(":");
-                return await connectDirect(ph, +pp || port, payload);
-            }
-        } catch {}
-        return null;
+const connectParallel=async(host,port,payload,order,mode,proxyCfg,proxyIp,getOrderFn,tryConnectFn,ws,header,userCfg,remoteVar,setRemote,retryFn)=>{
+    const tryConnect=async(type)=>{
+        try{
+            if(type==="direct") return await connectDirect(host,port,payload);
+            if(type==="s5"&&proxyCfg) return await tryConnectFn(proxyCfg,host,port,payload);
+            if(type==="proxy"&&proxyIp){const [ph,pp=port]=proxyIp.split(":");return await connectDirect(ph,+pp||port,payload);}
+        }catch{}return null;
     };
-    const tryNext = async (index) => {
-        if (index >= order.length) return null;
-        const sock = await tryConnect(order[index]);
-        return sock || (await tryNext(index + 1));
-    };
-    if (mode === "s5") {
-        if (proxyCfg) {
-            const sock = await tryConnect("s5");
-            if (sock) {
-                setRemote(sock);
-                await connectStreams(sock, ws, header, null, userCfg);
-            }
-        }
-        return;
-    }
-    const primary = await tryConnect(order[0]);
-    if (!primary) {
-        const backup = await tryNext(1);
-        if (backup) {
-            setRemote(backup);
-            await connectStreams(backup, ws, header, null, userCfg);
-        }
-        return;
-    }
+    const tryNext=async(index)=>{if(index>=order.length) return null;const sock=await tryConnect(order[index]);return sock||(await tryNext(index+1));};
+    if(mode==="s5"){if(proxyCfg){const sock=await tryConnect("s5");if(sock){setRemote(sock);await connectStreams(sock,ws,header,null,userCfg);}}return;}
+    const primary=await tryConnect(order[0]);
+    if(!primary){const backup=await tryNext(1);if(backup){setRemote(backup);await connectStreams(backup,ws,header,null,userCfg);}return;}
     setRemote(primary);
-    const retryFunc =
-        order.length > 1
-            ? async () => {
-                  const backup = await tryNext(1);
-                  if (backup) {
-                      try {
-                          primary.close();
-                      } catch {}
-                      setRemote(backup);
-                      await connectStreams(backup, ws, header, null, userCfg);
-                  }
-              }
-            : null;
-    await connectStreams(primary, ws, header, retryFunc, userCfg);
+    const retryFunc=order.length>1?async()=>{const backup=await tryNext(1);if(backup){try{primary.close();}catch{}setRemote(backup);await connectStreams(backup,ws,header,null,userCfg);}}:null;
+    await connectStreams(primary,ws,header,retryFunc,userCfg);
 };
 
 export default {
@@ -1056,18 +818,18 @@ export default {
             for (const d of domains) {
                 for (const p of ports) {
                     for (const v of variants) {
-                        const displayName = d.remark ? d.remark : `${v.label} ${d.ip}:${p}`;
-                        const trojanDisplayName = d.remark
-                            ? `${d.remark}`
-                            : `${v.label}  ${d.ip}:${p}`;
+                        const vlessName = d.remark ? `V ${v.label} ${d.remark}` : `V ${v.label} ${d.ip}:${p}`;
+                        const trojanName = d.remark
+                            ? `T ${v.label} ${d.remark}`
+                            : `T ${v.label}  ${d.ip}:${p}`;
                         out.push(
-                            buildVlessUri(v.raw, userConfig.uuid, displayName, workerHost, d.ip, p),
+                            buildVlessUri(v.raw, userConfig.uuid, vlessName, workerHost, d.ip, p),
                         );
                         out.push(
                             buildTrojanUri(
                                 v.raw,
                                 userConfig.uuid,
-                                trojanDisplayName,
+                                trojanName,
                                 workerHost,
                                 d.ip,
                                 p,
@@ -1283,18 +1045,18 @@ export default {
             for (const d of lists.domains) {
                 for (const p of lists.ports) {
                     for (const v of variants) {
-                        const displayName = d.remark ? d.remark : `${v.label} ${d.ip}:${p}`;
-                        const trojanDisplayName = d.remark
-                            ? `${d.remark}`
-                            : `${v.label}  ${d.ip}:${p}`;
+                        const vlessName = d.remark ? `V ${v.label} ${d.remark}` : `V ${v.label} ${d.ip}:${p}`;
+                        const trojanName = d.remark
+                            ? `T ${v.label} ${d.remark}`
+                            : `T ${v.label}  ${d.ip}:${p}`;
                         allNodeUris.push(
-                            buildVlessUri(v.raw, userUUID, displayName, lists.workerHost, d.ip, p),
+                            buildVlessUri(v.raw, userUUID, vlessName, lists.workerHost, d.ip, p),
                         );
                         allNodeUris.push(
                             buildTrojanUri(
                                 v.raw,
                                 userUUID,
-                                trojanDisplayName,
+                                trojanName,
                                 lists.workerHost,
                                 d.ip,
                                 p,
