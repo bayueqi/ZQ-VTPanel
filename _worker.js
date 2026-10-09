@@ -327,24 +327,124 @@ async function getUserConfig(env) {
     }
 }
 
+// ===================== 其它代理（socks5 / http / https / sstp / turn） =====================
+// 面板「其它代理」一栏填带协议前缀的完整地址，不带前缀按 SOCKS5 处理（兼容旧配置）：
+//   host:port / user:pass@host:port   → SOCKS5
+//   socks5://user:pass@host:port      → SOCKS5
+//   http://user:pass@host:port        → HTTP CONNECT 隧道
+//   https://user:pass@host:port       → HTTPS(TLS) CONNECT 隧道
+//   sstp://user:pass@host:port        → SSTP（VPN Gate 那类只出隧道协议的家宽节点走这个）
+//   turn://user:pass@host:port        → TURN 中继（RFC 6062）
+const PROXY_DEFAULT_PORTS={socks5:1080,http:8080,https:443,sstp:443,turn:3478};
+const PROXY_CONNECT_TIMEOUT_MS=9999;
+const proxyTextEncoder=new TextEncoder();
+const proxyTextDecoder=new TextDecoder();
+const SSTP_EMPTY_BYTES=new Uint8Array(0);
+const SSTP_TCP_MSS=1400;
+
+function stripIPv6Brackets(host){const value=String(host||"").trim();return value.startsWith("[")&&value.endsWith("]")?value.slice(1,-1):value;}
+function isIPv4(value){const parts=String(value||"").split(".");return parts.length===4&&parts.every((part)=>/^\d{1,3}$/.test(part)&&Number(part)<=255);}
+function toUint8(data){
+    if(data instanceof Uint8Array) return data;
+    if(data instanceof ArrayBuffer) return new Uint8Array(data);
+    if(ArrayBuffer.isView(data)) return new Uint8Array(data.buffer,data.byteOffset,data.byteLength);
+    return new Uint8Array(data||0);
+}
+function concatBytes(...chunks){
+    if(!chunks||!chunks.length) return new Uint8Array(0);
+    const list=chunks.map(toUint8);
+    const total=list.reduce((sum,chunk)=>sum+chunk.byteLength,0);
+    const merged=new Uint8Array(total);
+    let offset=0;
+    for(const chunk of list){merged.set(chunk,offset);offset+=chunk.byteLength;}
+    return merged;
+}
+function withTimeout(promise,timeoutMs,message){
+    let timer;
+    return Promise.race([
+        promise,
+        new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(message)),timeoutMs);}),
+    ]).finally(()=>clearTimeout(timer));
+}
+function readUint16(bytes,offset=0){return (bytes[offset]<<8)|bytes[offset+1];}
+function readUint32(bytes,offset=0){return ((bytes[offset]<<24)|(bytes[offset+1]<<16)|(bytes[offset+2]<<8)|bytes[offset+3])>>>0;}
+function randomUint16(){return readUint16(crypto.getRandomValues(new Uint8Array(2)));}
+function internetChecksum(bytes,offset,length){
+    let sum=0;
+    for(let i=offset;i<offset+length-1;i+=2) sum+=readUint16(bytes,i);
+    if(length&1) sum+=bytes[offset+length-1]<<8;
+    while(sum>>16) sum=(sum&0xffff)+(sum>>16);
+    return (~sum)&0xffff;
+}
+// SSTP / TURN 都要自己拼 IP 包，必须先拿到目标的 A 记录
+async function resolveIPv4(host){
+    const target=stripIPv6Brackets(host);
+    if(isIPv4(target)) return target;
+    try{
+        const res=await fetch("https://1.1.1.1/dns-query?name="+encodeURIComponent(target)+"&type=A",{headers:{accept:"application/dns-json"}});
+        const data=await res.json();
+        const record=(data.Answer||[]).find((item)=>item.type===1&&isIPv4(item.data));
+        return record?record.data:null;
+    }catch(e){
+        return null;
+    }
+}
+
+// 把其它代理地址解析成 { type, host, port, username, password }
 function parseProxyAddress(proxyStr){
     if(!proxyStr) return null;
-    proxyStr=proxyStr.trim();
-    if(proxyStr.startsWith("socks://")||proxyStr.startsWith("socks5://")){
+    const raw=String(proxyStr).trim().split("#")[0].trim();
+    if(!raw) return null;
+    const matched=/^(socks5|socks|http|https|sstp|turn):\/\//i.exec(raw);
+    let type="socks5",rest=raw;
+    if(matched){
+        type=matched[1].toLowerCase();
+        rest=raw.slice(matched[0].length);
+    }
+    if(type==="socks") type="socks5";
+    const at=rest.lastIndexOf("@");
+    const credential=at===-1?"":rest.slice(0,at);
+    const server=(at===-1?rest:rest.slice(at+1)).split("/")[0];
+    let username="",password="";
+    if(credential){
+        const split=credential.indexOf(":");
+        if(split===-1) return null;
         try{
-            const url=new URL(proxyStr.replace(/^socks:\/\//,"socks5://"));
-            if(!url.port) return null;
-            return {type:"socks5",host:url.hostname,port:+url.port,username:url.username?decodeURIComponent(url.username):"",password:url.password?decodeURIComponent(url.password):""};
-        }catch{return null;}
+            username=decodeURIComponent(credential.slice(0,split));
+            password=decodeURIComponent(credential.slice(split+1));
+        }catch(e){
+            username=credential.slice(0,split);
+            password=credential.slice(split+1);
+        }
     }
-    if(proxyStr.includes("@")){
-        const [cred,server]=proxyStr.split("@"),[user,pass]=cred.split(":"),[host,port]=server.split(":");
-        if(host&&port) return {type:"socks5",host,port:+port,username:user,password:pass};
-    }else if(proxyStr.includes(":")){
-        const [host,port]=proxyStr.split(":");
-        if(host&&port) return {type:"socks5",host,port:+port,username:"",password:""};
+    let host=server,port=PROXY_DEFAULT_PORTS[type]||0,hasExplicitPort=false;
+    if(server.startsWith("[")){
+        const close=server.indexOf("]");
+        if(close===-1) return null;
+        host=server.slice(0,close+1);
+        const tail=server.slice(close+1);
+        if(tail.startsWith(":")){
+            port=parseInt(tail.slice(1),10);
+            hasExplicitPort=true;
+        }
+    }else if(server.includes(":")){
+        const parts=server.split(":");
+        if(parts.length!==2) return null;
+        host=parts[0];
+        port=parseInt(parts[1],10);
+        hasExplicitPort=true;
     }
-    return null;
+    // 没写协议前缀时必须显式带端口：避免把随手输入的字符串当成代理地址（保持旧版行为）
+    if(!matched&&!hasExplicitPort) return null;
+    if(!host||!Number.isFinite(port)||port<=0||port>65535) return null;
+    return {type,host,port,username,password};
+}
+
+// 节点名里显示的协议短标签
+function proxyTypeLabel(address){
+    const config=parseProxyAddress(address);
+    if(!config) return "SOCKS5";
+    return ({socks5:"SOCKS5",http:"HTTP",https:"HTTPS",sstp:"SSTP",turn:"TURN"})[config.type]||config.type.toUpperCase();
 }
 
 async function socks5Connect(socket,proxyConfig,targetHost,targetPort,timeoutMs){
@@ -373,6 +473,689 @@ async function socks5Connect(socket,proxyConfig,targetHost,targetPort,timeoutMs)
         if(!res||res.timeout||new Uint8Array(res.value)[1]!==0x00) throw new Error("SOCKS5 connect failed");
         return {writer,reader};
     }catch(e){writer.releaseLock();reader.releaseLock();throw e;}
+}
+
+// ---- HTTP / HTTPS 代理（CONNECT 隧道）----
+async function httpConnect(proxyConfig,targetHost,targetPort,useTLS=false){
+    const serverHost=stripIPv6Brackets(proxyConfig.host);
+    const socket=useTLS
+        ? connect({hostname:serverHost,port:proxyConfig.port},{secureTransport:"on",allowHalfOpen:false})
+        : connect({hostname:serverHost,port:proxyConfig.port});
+    const writer=socket.writable.getWriter(),reader=socket.readable.getReader();
+    try{
+        if(useTLS) await withTimeout(socket.opened,PROXY_CONNECT_TIMEOUT_MS,"HTTPS proxy connection timeout");
+        const auth=proxyConfig.username&&proxyConfig.password
+            ?`Proxy-Authorization: Basic ${btoa(proxyConfig.username+":"+proxyConfig.password)}\r\n`
+            :"";
+        const target=`${stripIPv6Brackets(targetHost)}:${targetPort}`;
+        const request=`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n${auth}User-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n`;
+        await writer.write(proxyTextEncoder.encode(request));
+        writer.releaseLock();
+
+        let head=new Uint8Array(0),headEnd=-1,readBytes=0;
+        while(headEnd===-1&&readBytes<8192){
+            const {done,value}=await reader.read();
+            if(done||!value) throw new Error((useTLS?"HTTPS":"HTTP")+" proxy closed before CONNECT response");
+            head=new Uint8Array([...head,...value]);
+            readBytes=head.length;
+            const index=head.findIndex((_,i)=>i<head.length-3&&head[i]===0x0d&&head[i+1]===0x0a&&head[i+2]===0x0d&&head[i+3]===0x0a);
+            if(index!==-1) headEnd=index+4;
+        }
+        if(headEnd===-1) throw new Error("Proxy CONNECT response header too long or invalid");
+        const statusMatch=proxyTextDecoder.decode(head.slice(0,headEnd)).split("\r\n")[0].match(/HTTP\/\d\.\d\s+(\d+)/);
+        const statusCode=statusMatch?parseInt(statusMatch[1],10):NaN;
+        if(!Number.isFinite(statusCode)||statusCode<200||statusCode>=300) throw new Error("Proxy refused connection: HTTP "+statusCode);
+        reader.releaseLock();
+
+        if(readBytes>headEnd){
+            const {readable,writable}=new TransformStream();
+            const bridgeWriter=writable.getWriter();
+            await bridgeWriter.write(head.subarray(headEnd,readBytes));
+            bridgeWriter.releaseLock();
+            socket.readable.pipeTo(writable).catch(()=>{});
+            return {readable,writable:socket.writable,closed:socket.closed,close:()=>socket.close()};
+        }
+        return socket;
+    }catch(error){
+        try{writer.releaseLock();}catch(e){}
+        try{reader.releaseLock();}catch(e){}
+        try{socket.close();}catch(e){}
+        throw error;
+    }
+}
+
+// ---- SSTP 客户端（移植自 edgetunnel）：把只出 SSTP 的 VPN Gate 家宽节点当出口用 ----
+async function sstpConnect(proxyConfig,targetHost,targetPort){
+    const username=proxyConfig.username??null,password=proxyConfig.password??null;
+    let buffer=SSTP_EMPTY_BYTES,pppId=1,socket=null,reader=null,writer=null;
+    let settled=false,settleResolve,settleReject;
+    const closed=new Promise((resolve,reject)=>{settleResolve=resolve;settleReject=reject;});
+    const settle=(fn,value)=>{if(settled) return;settled=true;fn(value);};
+    const close=()=>{
+        try{reader?.cancel?.().catch?.(()=>{});}catch(e){}
+        try{reader?.releaseLock?.();}catch(e){}
+        try{writer?.close?.().catch?.(()=>{});}catch(e){}
+        try{writer?.releaseLock?.();}catch(e){}
+        try{socket?.close?.();}catch(e){}
+        settle(settleResolve);
+    };
+    const readChunk=async()=>{
+        const {value,done}=await reader.read();
+        if(done||!value) throw new Error("SSTP connection closed");
+        return toUint8(value);
+    };
+    const readN=async(length)=>{
+        while(buffer.byteLength<length){
+            const chunk=await readChunk();
+            buffer=buffer.byteLength?concatBytes(buffer,chunk):chunk;
+        }
+        const result=buffer.subarray(0,length);
+        buffer=buffer.subarray(length);
+        return result;
+    };
+    const readLine=async()=>{
+        for(;;){
+            const index=buffer.indexOf(10);
+            if(index>=0){
+                const line=proxyTextDecoder.decode(buffer.subarray(0,index));
+                buffer=buffer.subarray(index+1);
+                return line.replace(/\r$/,"");
+            }
+            const chunk=await readChunk();
+            buffer=buffer.byteLength?concatBytes(buffer,chunk):chunk;
+        }
+    };
+    const readPacket=async(timeoutMs=PROXY_CONNECT_TIMEOUT_MS)=>{
+        const header=await withTimeout(readN(4),timeoutMs,"SSTP read timeout");
+        const length=readUint16(header,2)&0x0fff;
+        if(length<4) throw new Error("Invalid SSTP packet length");
+        return {isControl:(header[1]&1)!==0,body:length>4?await withTimeout(readN(length-4),timeoutMs,"SSTP body read timeout"):SSTP_EMPTY_BYTES};
+    };
+    const packData=(pppFrame)=>{
+        const length=6+pppFrame.byteLength,packet=new Uint8Array(length);
+        packet.set([0x10,0x00,((length>>8)&0x0f)|0x80,length&0xff,0xff,0x03]);
+        packet.set(pppFrame,6);
+        return packet;
+    };
+    const buildPppConfig=(protocol,code,id,options=[])=>{
+        const optionsLength=options.reduce((sum,option)=>sum+2+option.data.byteLength,0);
+        const frame=new Uint8Array(6+optionsLength),view=new DataView(frame.buffer);
+        view.setUint16(0,protocol);
+        frame[2]=code;
+        frame[3]=id;
+        view.setUint16(4,4+optionsLength);
+        options.reduce((offset,option)=>{
+            frame[offset]=option.type;
+            frame[offset+1]=2+option.data.byteLength;
+            frame.set(option.data,offset+2);
+            return offset+2+option.data.byteLength;
+        },6);
+        return frame;
+    };
+    const parsePppFrame=(data)=>{
+        const offset=data.byteLength>=2&&data[0]===0xff&&data[1]===0x03?2:0;
+        if(data.byteLength-offset<4) return null;
+        const protocol=readUint16(data,offset);
+        if(protocol===0x0021) return {protocol,ipPacket:data.subarray(offset+2)};
+        if(data.byteLength-offset<6) return null;
+        return {protocol,code:data[offset+2],id:data[offset+3],payload:data.subarray(offset+6),rawPacket:data.subarray(offset)};
+    };
+    const parsePppOptions=(data)=>{
+        const options=[];
+        for(let offset=0;offset+2<=data.byteLength;){
+            const type=data[offset],length=data[offset+1];
+            if(length<2||offset+length>data.byteLength) break;
+            options.push({type,data:data.subarray(offset+2,offset+length)});
+            offset+=length;
+        }
+        return options;
+    };
+
+    try{
+        const serverHost=stripIPv6Brackets(proxyConfig.host),serverPort=proxyConfig.port;
+        socket=connect({hostname:serverHost,port:serverPort},{secureTransport:"on",allowHalfOpen:false});
+        await withTimeout(socket.opened,PROXY_CONNECT_TIMEOUT_MS,"SSTP server connection timeout");
+        reader=socket.readable.getReader();
+        writer=socket.writable.getWriter();
+
+        const displayHost=serverHost.includes(":")?`[${serverHost}]`:serverHost;
+        const httpRequest=proxyTextEncoder.encode(
+            "SSTP_DUPLEX_POST /sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/ HTTP/1.1\r\n"
+            +`Host: ${Number(serverPort)===443?displayHost:displayHost+":"+serverPort}\r\n`
+            +"Content-Length: 18446744073709551615\r\n"
+            +`SSTPCORRELATIONID: {${crypto.randomUUID()}}\r\n\r\n`
+        );
+        const encapsulation=new Uint8Array(2);
+        new DataView(encapsulation.buffer).setUint16(0,1);
+        const maxReceiveUnit=new Uint8Array(2);
+        new DataView(maxReceiveUnit.buffer).setUint16(0,1500);
+        const connectRequest=new Uint8Array(12+encapsulation.byteLength);
+        const connectView=new DataView(connectRequest.buffer);
+        connectRequest[0]=0x10;
+        connectRequest[1]=0x01;
+        connectView.setUint16(2,connectRequest.byteLength|0x8000);
+        connectView.setUint16(4,0x0001);
+        connectView.setUint16(6,1);
+        connectRequest[9]=1;
+        connectView.setUint16(10,4+encapsulation.byteLength);
+        connectRequest.set(encapsulation,12);
+
+        await withTimeout(writer.write(concatBytes(
+            httpRequest,
+            connectRequest,
+            packData(buildPppConfig(0xc021,1,pppId++,[{type:1,data:maxReceiveUnit}]))
+        )),PROXY_CONNECT_TIMEOUT_MS,"SSTP handshake request timeout");
+
+        const statusLine=await withTimeout(readLine(),PROXY_CONNECT_TIMEOUT_MS,"SSTP HTTP handshake timeout");
+        for(;;){
+            const line=await withTimeout(readLine(),PROXY_CONNECT_TIMEOUT_MS,"SSTP HTTP header timeout");
+            if(line==="") break;
+        }
+        if(!/HTTP\/\d(?:\.\d)?\s+2\d\d/i.test(statusLine)) throw new Error("SSTP HTTP handshake failed: "+(statusLine||"invalid status line"));
+
+        let localLcpAcked=false,peerLcpAcked=false,needsPap=false,papSent=false,papDone=false,ipcpSent=false,ipcpDone=false,localAddress=null;
+        const sendPap=async()=>{
+            if(!localLcpAcked||!peerLcpAcked||!needsPap||papSent) return;
+            if(username===null||password===null) throw new Error("SSTP server requires PAP authentication");
+            const userBytes=proxyTextEncoder.encode(username),passBytes=proxyTextEncoder.encode(password);
+            if(userBytes.byteLength>255||passBytes.byteLength>255) throw new Error("SSTP username or password too long");
+            const papLength=6+userBytes.byteLength+passBytes.byteLength;
+            const frame=new Uint8Array(2+papLength),view=new DataView(frame.buffer);
+            view.setUint16(0,0xc023);
+            frame[2]=1;
+            frame[3]=pppId++;
+            view.setUint16(4,papLength);
+            frame[6]=userBytes.byteLength;
+            frame.set(userBytes,7);
+            frame[7+userBytes.byteLength]=passBytes.byteLength;
+            frame.set(passBytes,8+userBytes.byteLength);
+            await withTimeout(writer.write(packData(frame)),PROXY_CONNECT_TIMEOUT_MS,"SSTP PAP request timeout");
+            papSent=true;
+        };
+        const startIpcp=async()=>{
+            if(!localLcpAcked||!peerLcpAcked||ipcpSent||(needsPap&&!papDone)) return;
+            await withTimeout(writer.write(packData(buildPppConfig(0x8021,1,pppId++,[{type:3,data:new Uint8Array(4)}]))),PROXY_CONNECT_TIMEOUT_MS,"SSTP IPCP request timeout");
+            ipcpSent=true;
+        };
+
+        for(let round=0;round<50&&!ipcpDone;round++){
+            const packet=await readPacket(PROXY_CONNECT_TIMEOUT_MS);
+            if(packet.isControl) continue;
+            const ppp=parsePppFrame(packet.body);
+            if(!ppp) continue;
+
+            if(ppp.protocol===0xc021){
+                if(ppp.code===1){
+                    const authOption=parsePppOptions(ppp.payload).find((option)=>option.type===3);
+                    if(authOption?.data?.byteLength>=2){
+                        const authProtocol=readUint16(authOption.data);
+                        if(authProtocol!==0xc023) throw new Error("SSTP unsupported PPP auth protocol: 0x"+authProtocol.toString(16));
+                        needsPap=true;
+                    }
+                    const ack=new Uint8Array(ppp.rawPacket);
+                    ack[2]=2;
+                    await withTimeout(writer.write(packData(ack)),PROXY_CONNECT_TIMEOUT_MS,"SSTP LCP ack timeout");
+                    peerLcpAcked=true;
+                    await sendPap();
+                    await startIpcp();
+                }else if(ppp.code===2){
+                    localLcpAcked=true;
+                    await sendPap();
+                    await startIpcp();
+                }
+                continue;
+            }
+
+            if(ppp.protocol===0xc023){
+                if(ppp.code===2){
+                    papDone=true;
+                    await startIpcp();
+                }else if(ppp.code===3) throw new Error("SSTP PAP authentication failed");
+                continue;
+            }
+
+            if(ppp.protocol===0x8021){
+                if(ppp.code===1){
+                    const ack=new Uint8Array(ppp.rawPacket);
+                    ack[2]=2;
+                    await withTimeout(writer.write(packData(ack)),PROXY_CONNECT_TIMEOUT_MS,"SSTP IPCP ack timeout");
+                    await startIpcp();
+                }else if(ppp.code===3){
+                    const addressOption=parsePppOptions(ppp.payload).find((option)=>option.type===3);
+                    if(addressOption?.data?.byteLength===4){
+                        localAddress=[...addressOption.data].join(".");
+                        await withTimeout(writer.write(packData(buildPppConfig(0x8021,1,pppId++,[{type:3,data:addressOption.data}]))),PROXY_CONNECT_TIMEOUT_MS,"SSTP IPCP address request timeout");
+                        ipcpSent=true;
+                    }
+                }else if(ppp.code===2){
+                    const addressOption=parsePppOptions(ppp.payload).find((option)=>option.type===3);
+                    if(addressOption?.data?.byteLength===4) localAddress=[...addressOption.data].join(".");
+                    ipcpDone=true;
+                }
+            }
+        }
+        if(!localAddress) throw new Error("SSTP did not assign an IPv4 address");
+
+        const target=stripIPv6Brackets(targetHost);
+        const targetIp=isIPv4(target)?target:await resolveIPv4(target);
+        if(!targetIp) throw new Error("SSTP cannot resolve "+targetHost+" to an IPv4 address");
+
+        const sourcePort=10000+(randomUint16()%50000);
+        const sourceBytes=new Uint8Array(String(localAddress).split(".").map(Number));
+        const targetBytes=new Uint8Array(String(targetIp).split(".").map(Number));
+        let sequence=readUint32(crypto.getRandomValues(new Uint8Array(4)));
+        let ackNumber=0;
+        const ipHeaderTemplate=new Uint8Array(20);
+        ipHeaderTemplate.set([0x45,0x00,0x00,0x00,0x00,0x00,0x40,0x00,64,6]);
+        ipHeaderTemplate.set(sourceBytes,12);
+        ipHeaderTemplate.set(targetBytes,16);
+        const tcpPseudoHeader=new Uint8Array(1432);
+        tcpPseudoHeader.set(sourceBytes);
+        tcpPseudoHeader.set(targetBytes,4);
+        tcpPseudoHeader[9]=6;
+        const buildTcpFrame=(flags,payload=SSTP_EMPTY_BYTES)=>{
+            const bytes=toUint8(payload);
+            const payloadLength=bytes.byteLength;
+            const tcpLength=20+payloadLength;
+            const ipLength=20+tcpLength;
+            const sstpLength=8+ipLength;
+            const frame=new Uint8Array(sstpLength);
+            const view=new DataView(frame.buffer);
+            frame.set([0x10,0x00,((sstpLength>>8)&0x0f)|0x80,sstpLength&0xff,0xff,0x03,0x00,0x21]);
+            frame.set(ipHeaderTemplate,8);
+            view.setUint16(10,ipLength);
+            view.setUint16(12,randomUint16());
+            view.setUint16(18,internetChecksum(frame,8,20));
+            view.setUint16(28,sourcePort);
+            view.setUint16(30,targetPort);
+            view.setUint32(32,sequence);
+            view.setUint32(36,ackNumber);
+            frame[40]=0x50;
+            frame[41]=flags;
+            view.setUint16(42,65535);
+            if(payloadLength) frame.set(bytes,48);
+            tcpPseudoHeader[10]=tcpLength>>8;
+            tcpPseudoHeader[11]=tcpLength&0xff;
+            tcpPseudoHeader.set(frame.subarray(28,28+tcpLength),12);
+            view.setUint16(44,internetChecksum(tcpPseudoHeader,0,12+tcpLength));
+            return frame;
+        };
+        const matchInbound=(ipPacket)=>{
+            if(ipPacket.byteLength<40||ipPacket[9]!==6) return null;
+            const headerLength=(ipPacket[0]&0x0f)*4;
+            if(ipPacket.byteLength<headerLength+20) return null;
+            if(readUint16(ipPacket,headerLength)!==targetPort) return null;
+            if(readUint16(ipPacket,headerLength+2)!==sourcePort) return null;
+            return {
+                flags:ipPacket[headerLength+13],
+                sequence:readUint32(ipPacket,headerLength+4),
+                payloadOffset:headerLength+((ipPacket[headerLength+12]>>4)&0x0f)*4,
+            };
+        };
+
+        await withTimeout(writer.write(buildTcpFrame(0x02)),PROXY_CONNECT_TIMEOUT_MS,"SSTP TCP SYN timeout");
+        sequence=(sequence+1)>>>0;
+
+        let tcpReady=false;
+        for(let attempt=0;attempt<30;attempt++){
+            const packet=await readPacket(PROXY_CONNECT_TIMEOUT_MS);
+            if(packet.isControl) continue;
+            const ppp=parsePppFrame(packet.body);
+            if(!ppp||ppp.protocol!==0x0021) continue;
+            const tcp=matchInbound(ppp.ipPacket);
+            if(!tcp||(tcp.flags&0x12)!==0x12) continue;
+            ackNumber=(tcp.sequence+1)>>>0;
+            await withTimeout(writer.write(buildTcpFrame(0x10)),PROXY_CONNECT_TIMEOUT_MS,"SSTP TCP ACK timeout");
+            tcpReady=true;
+            break;
+        }
+        if(!tcpReady) throw new Error("SSTP inner TCP handshake timeout");
+
+        let streamController=null;
+        const readable=new ReadableStream({
+            start(controller){streamController=controller;},
+            cancel(){close();},
+        });
+
+        (async()=>{
+            try{
+                let pendingChunks=[],pendingLength=0;
+                const flush=()=>{
+                    if(!pendingLength) return;
+                    if(!streamController) throw new Error("SSTP readable stream not ready");
+                    streamController.enqueue(pendingChunks.length===1?pendingChunks[0]:concatBytes(...pendingChunks));
+                    pendingChunks=[];
+                    pendingLength=0;
+                    writer.write(buildTcpFrame(0x10)).catch(()=>{});
+                };
+                for(;;){
+                    const packet=await readPacket(60000);
+                    if(packet.isControl) continue;
+                    const ppp=parsePppFrame(packet.body);
+                    if(!ppp||ppp.protocol!==0x0021) continue;
+                    const inbound=matchInbound(ppp.ipPacket);
+                    if(!inbound) continue;
+                    if(inbound.payloadOffset<ppp.ipPacket.byteLength){
+                        const payload=ppp.ipPacket.subarray(inbound.payloadOffset);
+                        if(payload.byteLength){
+                            ackNumber=(inbound.sequence+payload.byteLength)>>>0;
+                            pendingChunks.push(new Uint8Array(payload));
+                            pendingLength+=payload.byteLength;
+                        }
+                    }
+                    if(inbound.flags&0x01){
+                        flush();
+                        ackNumber=(ackNumber+1)>>>0;
+                        writer.write(buildTcpFrame(0x11)).catch(()=>{});
+                        const controller=streamController;
+                        if(controller){try{controller.close();}catch(e){}}
+                        close();
+                        return;
+                    }
+                    if(buffer.byteLength<4||pendingLength>=32768) flush();
+                }
+            }catch(error){
+                const controller=streamController;
+                if(controller){try{controller.error(error);}catch(e){}}
+                settle(settleReject,error);
+                try{socket?.close?.();}catch(e){}
+            }
+        })();
+
+        const writable=new WritableStream({
+            async write(chunk){
+                const bytes=toUint8(chunk);
+                if(!bytes.byteLength) return;
+                if(bytes.byteLength<=SSTP_TCP_MSS){
+                    await writer.write(buildTcpFrame(0x18,bytes));
+                    sequence=(sequence+bytes.byteLength)>>>0;
+                    return;
+                }
+                const frames=[];
+                for(let offset=0;offset<bytes.byteLength;offset+=SSTP_TCP_MSS){
+                    const segment=bytes.subarray(offset,Math.min(offset+SSTP_TCP_MSS,bytes.byteLength));
+                    frames.push(buildTcpFrame(0x18,segment));
+                    sequence=(sequence+segment.byteLength)>>>0;
+                }
+                await writer.write(concatBytes(...frames));
+            },
+            close(){return writer.write(buildTcpFrame(0x11)).catch(()=>{});},
+            abort(error){
+                close();
+                if(error) settle(settleReject,error);
+            },
+        });
+
+        return {readable,writable,closed,close};
+    }catch(error){
+        close();
+        throw error;
+    }
+}
+
+// ---- TURN 中继（RFC 6062）：CONNECT 方式让 TURN 服务器替我们连目标 ----
+const TURN_STUN_MAGIC_COOKIE=new Uint8Array([0x21,0x12,0xa4,0x42]);
+const TURN_STUN_TYPE={
+    ALLOCATE_REQUEST:0x0003,ALLOCATE_SUCCESS:0x0103,ALLOCATE_ERROR:0x0113,
+    CREATE_PERMISSION_REQUEST:0x0008,CREATE_PERMISSION_SUCCESS:0x0108,
+    CONNECT_REQUEST:0x000a,CONNECT_SUCCESS:0x010a,
+    CONNECTION_BIND_REQUEST:0x000b,CONNECTION_BIND_SUCCESS:0x010b,
+};
+const TURN_STUN_ATTR={
+    USERNAME:0x0006,MESSAGE_INTEGRITY:0x0008,ERROR_CODE:0x0009,
+    XOR_PEER_ADDRESS:0x0012,REALM:0x0014,NONCE:0x0015,
+    REQUESTED_TRANSPORT:0x0019,CONNECTION_ID:0x002a,
+};
+function turnStunPadding(length){return -length&3;}
+function createTurnStunAttribute(type,value){
+    const body=toUint8(value);
+    const attribute=new Uint8Array(4+body.byteLength+turnStunPadding(body.byteLength));
+    const view=new DataView(attribute.buffer);
+    view.setUint16(0,type);
+    view.setUint16(2,body.byteLength);
+    attribute.set(body,4);
+    return attribute;
+}
+function createTurnStunMessage(type,transactionId,attributes){
+    const body=concatBytes(...attributes);
+    const header=new Uint8Array(20);
+    const view=new DataView(header.buffer);
+    view.setUint16(0,type);
+    view.setUint16(2,body.byteLength);
+    header.set(TURN_STUN_MAGIC_COOKIE,4);
+    header.set(transactionId,8);
+    return concatBytes(header,body);
+}
+function parseTurnErrorCode(data){return data?.byteLength>=4?(data[2]&7)*100+data[3]:0;}
+function randomTurnTransactionId(){return crypto.getRandomValues(new Uint8Array(12));}
+async function addTurnMessageIntegrity(message,key){
+    const signedMessage=new Uint8Array(message);
+    const view=new DataView(signedMessage.buffer);
+    view.setUint16(2,view.getUint16(2)+24);
+    const hmacKey=await crypto.subtle.importKey("raw",key,{name:"HMAC",hash:"SHA-1"},false,["sign"]);
+    const signature=await crypto.subtle.sign("HMAC",hmacKey,signedMessage);
+    return concatBytes(signedMessage,createTurnStunAttribute(TURN_STUN_ATTR.MESSAGE_INTEGRITY,new Uint8Array(signature)));
+}
+async function readTurnStunMessage(reader,bufferedData=null,timeoutMessage="TURN response timeout"){
+    let buffer=bufferedData?.byteLength?toUint8(bufferedData):new Uint8Array(0);
+    const pull=async()=>{
+        const {done,value}=await withTimeout(reader.read(),PROXY_CONNECT_TIMEOUT_MS,timeoutMessage);
+        if(done) throw new Error("TURN server closed connection");
+        if(value?.byteLength) buffer=concatBytes(buffer,value);
+    };
+    while(buffer.byteLength<20) await pull();
+
+    const messageLength=20+((buffer[2]<<8)|buffer[3]);
+    if(messageLength>65555) throw new Error("TURN response too large");
+    while(buffer.byteLength<messageLength) await pull();
+    const messageBuffer=buffer.subarray(0,messageLength);
+    if(TURN_STUN_MAGIC_COOKIE.some((value,index)=>messageBuffer[4+index]!==value)) throw new Error("Invalid TURN/STUN response");
+
+    const view=new DataView(messageBuffer.buffer,messageBuffer.byteOffset,messageBuffer.byteLength);
+    const attributes={};
+    for(let offset=20;offset+4<=messageLength;){
+        const type=view.getUint16(offset);
+        const length=view.getUint16(offset+2);
+        if(offset+4+length>messageBuffer.byteLength) break;
+        attributes[type]=messageBuffer.slice(offset+4,offset+4+length);
+        offset+=4+length+turnStunPadding(length);
+    }
+    return {
+        message:{type:view.getUint16(0),attributes},
+        extraData:buffer.byteLength>messageLength?buffer.subarray(messageLength):null,
+    };
+}
+async function writeTurnBytes(writer,bytes,timeoutMessage){
+    await withTimeout(writer.write(bytes),PROXY_CONNECT_TIMEOUT_MS,timeoutMessage);
+}
+async function turnConnect(proxyConfig,targetHost,targetPort){
+    const username=proxyConfig.username??null,password=proxyConfig.password??null;
+    const target=stripIPv6Brackets(targetHost);
+    const targetIp=isIPv4(target)?target:await resolveIPv4(target);
+    if(!targetIp) throw new Error(`Could not resolve ${targetHost} to an IPv4 address for TURN CONNECT`);
+
+    const turnHost=stripIPv6Brackets(proxyConfig.host);
+    let controlSocket=null,dataSocket=null,controlWriter=null,controlReader=null,dataWriter=null,dataReader=null,dataReaderReleased=false;
+    const close=()=>{
+        try{controlSocket?.close?.();}catch(e){}
+        try{dataSocket?.close?.();}catch(e){}
+    };
+    const releaseDataReader=()=>{
+        if(dataReaderReleased) return;
+        dataReaderReleased=true;
+        try{dataReader?.releaseLock?.();}catch(e){}
+    };
+
+    try{
+        controlSocket=connect({hostname:turnHost,port:proxyConfig.port});
+        await withTimeout(controlSocket.opened,PROXY_CONNECT_TIMEOUT_MS,"TURN server connection timeout");
+        controlWriter=controlSocket.writable.getWriter();
+        controlReader=controlSocket.readable.getReader();
+
+        const xorPeerAddress=new Uint8Array(8);
+        xorPeerAddress[1]=1;
+        new DataView(xorPeerAddress.buffer).setUint16(2,targetPort^0x2112);
+        targetIp.split(".").forEach((value,index)=>{
+            xorPeerAddress[4+index]=Number(value)^TURN_STUN_MAGIC_COOKIE[index];
+        });
+        const peerAddress=createTurnStunAttribute(TURN_STUN_ATTR.XOR_PEER_ADDRESS,xorPeerAddress);
+        const requestedTransport=new Uint8Array([6,0,0,0]);
+
+        await writeTurnBytes(controlWriter,createTurnStunMessage(
+            TURN_STUN_TYPE.ALLOCATE_REQUEST,
+            randomTurnTransactionId(),
+            [createTurnStunAttribute(TURN_STUN_ATTR.REQUESTED_TRANSPORT,requestedTransport)]
+        ),"TURN Allocate request timeout");
+
+        let turnResponse=await readTurnStunMessage(controlReader,null,"TURN Allocate response timeout");
+        let message=turnResponse.message;
+        let bufferedData=turnResponse.extraData;
+        let integrityKey=null;
+        let authAttributes=[];
+        const sign=(messageToSign)=>integrityKey?addTurnMessageIntegrity(messageToSign,integrityKey):Promise.resolve(messageToSign);
+
+        if(
+            message.type===TURN_STUN_TYPE.ALLOCATE_ERROR
+            &&username!==null
+            &&password!==null
+            &&parseTurnErrorCode(message.attributes[TURN_STUN_ATTR.ERROR_CODE])===401
+        ){
+            const realmBytes=message.attributes[TURN_STUN_ATTR.REALM];
+            const nonce=message.attributes[TURN_STUN_ATTR.NONCE];
+            if(!realmBytes||!nonce?.byteLength) throw new Error("TURN authentication challenge is missing realm or nonce");
+
+            const realm=proxyTextDecoder.decode(realmBytes);
+            integrityKey=new Uint8Array(await crypto.subtle.digest("MD5",proxyTextEncoder.encode(`${username}:${realm}:${password}`)));
+            authAttributes=[
+                createTurnStunAttribute(TURN_STUN_ATTR.USERNAME,proxyTextEncoder.encode(username)),
+                createTurnStunAttribute(TURN_STUN_ATTR.REALM,proxyTextEncoder.encode(realm)),
+                createTurnStunAttribute(TURN_STUN_ATTR.NONCE,nonce),
+            ];
+
+            const allocateRequest=await addTurnMessageIntegrity(createTurnStunMessage(
+                TURN_STUN_TYPE.ALLOCATE_REQUEST,
+                randomTurnTransactionId(),
+                [
+                    createTurnStunAttribute(TURN_STUN_ATTR.REQUESTED_TRANSPORT,requestedTransport),
+                    ...authAttributes,
+                ]
+            ),integrityKey);
+            const pipelinedMessages=await Promise.all([
+                sign(createTurnStunMessage(TURN_STUN_TYPE.CREATE_PERMISSION_REQUEST,randomTurnTransactionId(),[peerAddress,...authAttributes])),
+                sign(createTurnStunMessage(TURN_STUN_TYPE.CONNECT_REQUEST,randomTurnTransactionId(),[peerAddress,...authAttributes])),
+            ]);
+            await writeTurnBytes(controlWriter,concatBytes(allocateRequest,...pipelinedMessages),"TURN authenticated Allocate request timeout");
+            turnResponse=await readTurnStunMessage(controlReader,bufferedData,"TURN authenticated Allocate response timeout");
+            message=turnResponse.message;
+            bufferedData=turnResponse.extraData;
+        }else if(message.type===TURN_STUN_TYPE.ALLOCATE_SUCCESS){
+            const pipelinedMessages=await Promise.all([
+                sign(createTurnStunMessage(TURN_STUN_TYPE.CREATE_PERMISSION_REQUEST,randomTurnTransactionId(),[peerAddress,...authAttributes])),
+                sign(createTurnStunMessage(TURN_STUN_TYPE.CONNECT_REQUEST,randomTurnTransactionId(),[peerAddress,...authAttributes])),
+            ]);
+            if(pipelinedMessages.length) await writeTurnBytes(controlWriter,concatBytes(...pipelinedMessages),"TURN pipelined request timeout");
+        }
+
+        if(message.type!==TURN_STUN_TYPE.ALLOCATE_SUCCESS){
+            const errorCode=parseTurnErrorCode(message.attributes[TURN_STUN_ATTR.ERROR_CODE]);
+            throw new Error(errorCode?`TURN Allocate failed with ${errorCode}`:"TURN Allocate failed");
+        }
+
+        dataSocket=connect({hostname:turnHost,port:proxyConfig.port});
+        turnResponse=await readTurnStunMessage(controlReader,bufferedData,"TURN CreatePermission response timeout");
+        message=turnResponse.message;
+        bufferedData=turnResponse.extraData;
+        if(message.type!==TURN_STUN_TYPE.CREATE_PERMISSION_SUCCESS) throw new Error("TURN CreatePermission failed");
+
+        turnResponse=await readTurnStunMessage(controlReader,bufferedData,"TURN CONNECT response timeout");
+        message=turnResponse.message;
+        bufferedData=turnResponse.extraData;
+        if(message.type!==TURN_STUN_TYPE.CONNECT_SUCCESS||!message.attributes[TURN_STUN_ATTR.CONNECTION_ID]) throw new Error("TURN CONNECT failed");
+
+        await withTimeout(dataSocket.opened,PROXY_CONNECT_TIMEOUT_MS,"TURN data connection timeout");
+        dataWriter=dataSocket.writable.getWriter();
+        dataReader=dataSocket.readable.getReader();
+        await writeTurnBytes(dataWriter,await sign(createTurnStunMessage(
+            TURN_STUN_TYPE.CONNECTION_BIND_REQUEST,
+            randomTurnTransactionId(),
+            [
+                createTurnStunAttribute(TURN_STUN_ATTR.CONNECTION_ID,message.attributes[TURN_STUN_ATTR.CONNECTION_ID]),
+                ...authAttributes,
+            ]
+        )),"TURN ConnectionBind request timeout");
+
+        turnResponse=await readTurnStunMessage(dataReader,null,"TURN ConnectionBind response timeout");
+        message=turnResponse.message;
+        const extraPayload=turnResponse.extraData;
+        if(message.type!==TURN_STUN_TYPE.CONNECTION_BIND_SUCCESS) throw new Error("TURN ConnectionBind failed");
+
+        controlWriter.releaseLock();
+        controlWriter=null;
+        controlReader.releaseLock();
+        controlReader=null;
+        dataWriter.releaseLock();
+        dataWriter=null;
+
+        const readable=new ReadableStream({
+            start(controller){
+                if(extraPayload?.byteLength) controller.enqueue(extraPayload);
+            },
+            pull(controller){
+                return dataReader.read().then(({done,value})=>{
+                    if(done){
+                        releaseDataReader();
+                        controller.close();
+                    }else if(value?.byteLength) controller.enqueue(new Uint8Array(value));
+                });
+            },
+            cancel(){
+                try{dataReader?.cancel?.();}catch(e){}
+                releaseDataReader();
+                close();
+            },
+        });
+
+        return {readable,writable:dataSocket.writable,closed:dataSocket.closed,close};
+    }catch(error){
+        try{controlWriter?.releaseLock?.();}catch(e){}
+        try{controlReader?.releaseLock?.();}catch(e){}
+        try{dataWriter?.releaseLock?.();}catch(e){}
+        releaseDataReader();
+        close();
+        throw error;
+    }
+}
+
+// 统一入口：按其它代理类型建立连接，返回可直接当 socket 用的对象
+async function connectViaProxy(proxyConfig,targetHost,targetPort,initialData){
+    if(!proxyConfig||!proxyConfig.host) throw new Error("empty chain proxy config");
+    const type=proxyConfig.type||"socks5";
+    let socket;
+    if(type==="sstp"){
+        socket=await sstpConnect(proxyConfig,targetHost,targetPort);
+    }else if(type==="turn"){
+        socket=await turnConnect(proxyConfig,targetHost,targetPort);
+    }else if(type==="http"||type==="https"){
+        socket=await httpConnect(proxyConfig,targetHost,targetPort,type==="https");
+    }else{
+        const raw=connect({hostname:stripIPv6Brackets(proxyConfig.host),port:proxyConfig.port});
+        try{
+            const {writer,reader}=await socks5Connect(raw,proxyConfig,targetHost,targetPort,2500);
+            writer.releaseLock();
+            reader.releaseLock();
+            socket=raw;
+        }catch(error){
+            try{raw.close();}catch(e){}
+            throw error;
+        }
+    }
+    const payload=toUint8(initialData);
+    if(payload.byteLength){
+        const writer=socket.writable.getWriter();
+        await writer.write(payload);
+        writer.releaseLock();
+    }
+    return socket;
 }
 
 const connectDirect=async(hostname,portNum,data)=>{const sock=connect({hostname,port:portNum});await sock.opened;const w=sock.writable.getWriter();await w.write(data);w.releaseLock();return sock;};
@@ -432,20 +1215,21 @@ export default {
         const buildVariants = (s5, proxyIp, nodeTypes) => {
             const v = [];
             const types = Array.isArray(nodeTypes) && nodeTypes.length > 0 ? nodeTypes : ["direct"];
+            const proxyLabel = s5 ? proxyTypeLabel(s5) : "";
             if (types.includes("direct")) {
                 v.push({ label: "直连", raw: buildPath("d", 1, null, null) });
             }
             if (s5 && types.includes("s5")) {
-                v.push({ label: "SOCKS5", raw: buildPath("s", null, s5, null) });
+                v.push({ label: proxyLabel, raw: buildPath("s", null, s5, null) });
             }
             if (s5 && types.includes("direct_s5")) {
-                v.push({ label: "直连+SOCKS5", raw: buildPath("p", 1, s5, null) });
+                v.push({ label: "直连+" + proxyLabel, raw: buildPath("p", 1, s5, null) });
             }
             if (proxyIp && types.includes("direct_proxy")) {
                 v.push({ label: "直连+ProxyIP", raw: buildPath("p", 1, null, proxyIp) });
             }
             if (s5 && proxyIp && types.includes("direct_s5_proxy")) {
-                v.push({ label: "直连+SOCKS5+ProxyIP", raw: buildPath("p", 1, s5, proxyIp) });
+                v.push({ label: "直连+" + proxyLabel + "+ProxyIP", raw: buildPath("p", 1, s5, proxyIp) });
             }
             // 至少要有一个变体
             if (v.length === 0) {
@@ -550,29 +1334,6 @@ export default {
                 isDNS = false,
                 isTrojan = false,
                 trojanUDPCtx = null;
-
-            const connect2Socks5 = async (proxyConfig, targetHost, targetPort, initialData) => {
-                const { host, port } = proxyConfig;
-                const socket = connect({ hostname: host, port });
-                try {
-                    const { writer, reader } = await socks5Connect(
-                        socket,
-                        proxyConfig,
-                        targetHost,
-                        targetPort,
-                        2500,
-                    );
-                    await writer.write(initialData);
-                    writer.releaseLock();
-                    reader.releaseLock();
-                    return socket;
-                } catch (error) {
-                    try {
-                        socket.close();
-                    } catch (e) {}
-                    throw error;
-                }
-            };
 
             const setRemote = (val) => (remote = val);
 
@@ -756,7 +1517,7 @@ export default {
                                                     rawClientData,
                                                 );
                                             if (type === "s5" && proxyConfig)
-                                                return await connect2Socks5(
+                                                return await connectViaProxy(
                                                     proxyConfig,
                                                     hostname,
                                                     port,
@@ -892,7 +1653,7 @@ export default {
                                 proxyConfig,
                                 PROXY_IP,
                                 getOrder,
-                                connect2Socks5,
+                                connectViaProxy,
                                 ws,
                                 header,
                                 userConfig,
@@ -1992,32 +2753,154 @@ export default {
 		
 		@media(max-width: 640px) {
 		  .wrap {
-		    padding: 16px;
+		    padding: 14px 12px 28px;
+		  }
+		
+		  .header {
+		    margin-bottom: 18px;
+		    padding: 12px 0;
 		  }
 		
 		  h1 {
-		    font-size: 24px;
+		    font-size: 22px;
+		  }
+		
+		  .subtitle {
+		    font-size: 13px;
 		  }
 		
 		  .topbar {
 		    position: static;
 		    justify-content: center;
-		    margin-bottom: 20px;
+		    margin-bottom: 16px;
 		  }
 		
 		  .btn {
 		    min-width: 100%;
-		    margin-bottom: 8px;
+		    margin-bottom: 6px;
+		    padding: 11px 16px;
+		    font-size: 14px;
+		  }
+		
+		  .button-group {
+		    gap: 8px;
 		  }
 		
 		  .tab-nav {
 		    overflow-x: auto;
 		    flex-wrap: nowrap;
+		    -webkit-overflow-scrolling: touch;
+		    scrollbar-width: none;
+		  }
+		
+		  .tab-nav::-webkit-scrollbar {
+		    display: none;
 		  }
 		
 		  .tab-btn {
 		    white-space: nowrap;
+		    flex: none;
 		  }
+		
+		  /* 折叠区：收紧内边距，缩短滚动距离 */
+		  .collapse-section {
+		    margin-bottom: 12px;
+		  }
+		
+		  .collapse-header {
+		    padding: 12px 14px;
+		    font-size: 15px;
+		  }
+		
+		  .collapse-content.active {
+		    padding: 14px;
+		  }
+		
+		  /* 手机端取消配置区的内部滚动，交给整页滚动，避免嵌套滚动 */
+		  .collapse-content.scroll-area.active {
+		    max-height: none;
+		  }
+		
+		  .form-group {
+		    margin-bottom: 14px;
+		  }
+		
+		  label {
+		    margin-bottom: 6px;
+		    font-size: 14px;
+		  }
+		
+		  input[type="text"],
+		  input[type="number"],
+		  input[type="password"] {
+		    padding: 10px 12px;
+		    border-radius: 8px;
+		    font-size: 13px;
+		  }
+		
+		  /* 输入行：允许输入框收缩，按钮不再把输入框挤出容器 */
+		  .input-group,
+		  .list-item {
+		    gap: 6px;
+		  }
+		
+		  .input-group input,
+		  .list-item input {
+		    min-width: 0;
+		  }
+		
+		  .input-group .btn,
+		  .list-item .btn,
+		  .chip {
+		    padding: 9px 10px;
+		    font-size: 12px;
+		    margin-bottom: 0;
+		  }
+		
+		  .label-with-link {
+		    flex-wrap: wrap;
+		    gap: 6px;
+		  }
+		
+		  .label-with-link .btn {
+		    min-width: auto;
+		    flex: none;
+		    margin-bottom: 0;
+		    padding: 6px 12px;
+		    font-size: 13px;
+		  }
+		
+		  .link-arrow {
+		    width: 26px;
+		    height: 26px;
+		    margin-left: 4px;
+		  }
+		
+		  /* 节点类型：更紧凑 */
+		  .node-type-item {
+		    padding: 10px 12px;
+		    gap: 10px;
+		  }
+		
+		  .node-type-label {
+		    font-size: 13.5px;
+		    overflow-wrap: anywhere;
+		  }
+		
+		  .node-type-desc {
+		    font-size: 11.5px;
+		    overflow-wrap: anywhere;
+		  }
+		
+		  .node-type-badge {
+		    font-size: 10px;
+		    padding: 2px 6px;
+		  }
+		
+		  .url-box {
+		    overflow-wrap: anywhere;
+		  }
+		}
 	</style>
 </head>
 <body>
@@ -2098,18 +2981,18 @@ export default {
 							</div>
 						</div>
 						<div class="form-group">
-							<label for="s5">SOCKS5代理(可选)</label>
-							<div class="input-group">
-								<input type="text" id="s5" name="s5" placeholder="格式: user:pass@host:port 或 host:port">
-							</div>
-						</div>
-						<div class="form-group">
 							<div class="label-with-link">
 								<label for="proxyIp">ProxyIP(可选)</label>
 								<a href="https://ipdb.030101.xyz/bestproxy/" target="_blank" rel="nofollow noopener" class="link-arrow" title="ProxyIP地址">↗</a>
 							</div>
 							<div class="input-group">
 								<input type="text" id="proxyIp" name="proxyIp" placeholder="格式: host:port 或 host">
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="s5">其它代理(可选)</label>
+							<div class="input-group">
+								<input type="text" id="s5" name="s5" placeholder="格式: [协议://]user:pass@host:port 或 host:port，协议支持 socks5 / http / https / sstp / turn">
 							</div>
 						</div>
 						<div class="form-group">
@@ -2153,18 +3036,18 @@ export default {
 								<div class="node-type-item" data-type="s5" data-require="s5">
 									<input type="checkbox" class="node-type-checkbox" value="s5" disabled>
 									<div style="flex: 1;">
-										<div class="node-type-label">🔵 SOCKS5</div>
-										<div class="node-type-desc">仅使用SOCKS5代理连接目标</div>
+										<div class="node-type-label">🔵 其它代理</div>
+										<div class="node-type-desc">仅使用其它代理连接目标，不做直连回退</div>
 									</div>
-									<span class="node-type-badge" id="badge-s5">需填写SOCKS5</span>
+									<span class="node-type-badge" id="badge-s5">需填写其它代理</span>
 								</div>
 								<div class="node-type-item" data-type="direct_s5" data-require="s5">
 									<input type="checkbox" class="node-type-checkbox" value="direct_s5" disabled>
 									<div style="flex: 1;">
-										<div class="node-type-label">🟡 直连 + SOCKS5</div>
-										<div class="node-type-desc">优先直连，失败后回退到SOCKS5代理</div>
+										<div class="node-type-label">🟡 直连 + 其它代理</div>
+										<div class="node-type-desc">优先直连，失败后回退到其它代理</div>
 									</div>
-									<span class="node-type-badge" id="badge-direct_s5">需填写SOCKS5</span>
+									<span class="node-type-badge" id="badge-direct_s5">需填写其它代理</span>
 								</div>
 								<div class="node-type-item" data-type="direct_proxy" data-require="proxyIp">
 									<input type="checkbox" class="node-type-checkbox" value="direct_proxy" disabled>
@@ -2177,10 +3060,10 @@ export default {
 								<div class="node-type-item" data-type="direct_s5_proxy" data-require="s5_proxy">
 									<input type="checkbox" class="node-type-checkbox" value="direct_s5_proxy" disabled>
 									<div style="flex: 1;">
-										<div class="node-type-label">🟤 直连 + SOCKS5 + ProxyIP</div>
-										<div class="node-type-desc">直连→SOCKS5→ProxyIP，多重回退</div>
+										<div class="node-type-label">🟤 直连 + 其它代理 + ProxyIP</div>
+										<div class="node-type-desc">直连→其它代理→ProxyIP，多重回退</div>
 									</div>
-									<span class="node-type-badge" id="badge-direct_s5_proxy">需填写SOCKS5+ProxyIP</span>
+									<span class="node-type-badge" id="badge-direct_s5_proxy">需填写其它代理+ProxyIP</span>
 								</div>
 							</div>
 						</div>
@@ -2746,7 +3629,7 @@ export default {
 			            }
 			        });
 			        
-			        // 监听 SOCKS5 和 ProxyIP 输入变化，动态更新节点类型可用性
+			        // 监听其它代理和 ProxyIP 输入变化，动态更新节点类型可用性
 			        const s5Input = document.getElementById('s5');
 			        const proxyIpInput = document.getElementById('proxyIp');
 			        s5Input && s5Input.addEventListener('input', () => {
