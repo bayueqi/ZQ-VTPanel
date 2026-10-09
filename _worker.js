@@ -335,11 +335,12 @@ async function getUserConfig(env) {
 //   https://user:pass@host:port       → HTTPS(TLS) CONNECT 隧道
 //   sstp://user:pass@host:port        → SSTP（VPN Gate 那类只出隧道协议的家宽节点走这个）
 //   turn://user:pass@host:port        → TURN 中继（RFC 6062）
-const PROXY_DEFAULT_PORTS={socks5:1080,http:8080,https:443,sstp:443,turn:3478};
+const PROXY_DEFAULT_PORTS={socks5:1080,http:80,https:443,sstp:443,turn:3478};
+const PROXY_BASE64_CREDENTIAL=/^(?:[A-Z0-9+/]{4})*(?:[A-Z0-9+/]{2}==|[A-Z0-9+/]{3}=)?$/i;
 const PROXY_CONNECT_TIMEOUT_MS=9999;
-const proxyTextEncoder=new TextEncoder();
-const proxyTextDecoder=new TextDecoder();
-const SSTP_EMPTY_BYTES=new Uint8Array(0);
+const textEncoder=new TextEncoder();
+const textDecoder=new TextDecoder();
+const EMPTY_BYTES=new Uint8Array(0);
 const SSTP_TCP_MSS=1400;
 
 function stripIPv6Brackets(host){const value=String(host||"").trim();return value.startsWith("[")&&value.endsWith("]")?value.slice(1,-1):value;}
@@ -407,14 +408,19 @@ function parseProxyAddress(proxyStr){
     const server=(at===-1?rest:rest.slice(at+1)).split("/")[0];
     let username="",password="";
     if(credential){
-        const split=credential.indexOf(":");
+        // 兼容订阅里常见的 base64(user:pass) 写法
+        let decoded=credential.replaceAll("%3D","=");
+        if(!decoded.includes(":")&&PROXY_BASE64_CREDENTIAL.test(decoded)){
+            try{decoded=atob(decoded);}catch(e){}
+        }
+        const split=decoded.indexOf(":");
         if(split===-1) return null;
         try{
-            username=decodeURIComponent(credential.slice(0,split));
-            password=decodeURIComponent(credential.slice(split+1));
+            username=decodeURIComponent(decoded.slice(0,split));
+            password=decodeURIComponent(decoded.slice(split+1));
         }catch(e){
-            username=credential.slice(0,split);
-            password=credential.slice(split+1);
+            username=decoded.slice(0,split);
+            password=decoded.slice(split+1);
         }
     }
     let host=server,port=PROXY_DEFAULT_PORTS[type]||0,hasExplicitPort=false;
@@ -440,7 +446,6 @@ function parseProxyAddress(proxyStr){
     return {type,host,port,username,password};
 }
 
-// 节点名里显示的协议短标签
 function proxyTypeLabel(address){
     const config=parseProxyAddress(address);
     if(!config) return "SOCKS5";
@@ -489,7 +494,7 @@ async function httpConnect(proxyConfig,targetHost,targetPort,useTLS=false){
             :"";
         const target=`${stripIPv6Brackets(targetHost)}:${targetPort}`;
         const request=`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n${auth}User-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n`;
-        await writer.write(proxyTextEncoder.encode(request));
+        await writer.write(textEncoder.encode(request));
         writer.releaseLock();
 
         let head=new Uint8Array(0),headEnd=-1,readBytes=0;
@@ -502,7 +507,7 @@ async function httpConnect(proxyConfig,targetHost,targetPort,useTLS=false){
             if(index!==-1) headEnd=index+4;
         }
         if(headEnd===-1) throw new Error("Proxy CONNECT response header too long or invalid");
-        const statusMatch=proxyTextDecoder.decode(head.slice(0,headEnd)).split("\r\n")[0].match(/HTTP\/\d\.\d\s+(\d+)/);
+        const statusMatch=textDecoder.decode(head.slice(0,headEnd)).split("\r\n")[0].match(/HTTP\/\d\.\d\s+(\d+)/);
         const statusCode=statusMatch?parseInt(statusMatch[1],10):NaN;
         if(!Number.isFinite(statusCode)||statusCode<200||statusCode>=300) throw new Error("Proxy refused connection: HTTP "+statusCode);
         reader.releaseLock();
@@ -524,10 +529,786 @@ async function httpConnect(proxyConfig,targetHost,targetPort,useTLS=false){
     }
 }
 
-// ---- SSTP 客户端（移植自 edgetunnel）：把只出 SSTP 的 VPN Gate 家宽节点当出口用 ----
+// ---- HTTPS 代理：自研 TLS 客户端（不校验证书，AES-GCM / ChaCha20-Poly1305 双套件，TLS 1.2 / 1.3）----
+// 不用 CF 内置的 secureTransport:"on"：它会校验证书，公共 HTTPS 代理多为自签 → 握手必失败；且只提供 AES-GCM 套件。
+function isIpAddress(hostname=""){
+    const host=stripIPv6Brackets(hostname);
+    const ipv4Regex=/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+    if(ipv4Regex.test(host)) return true;
+    if(!host.includes(":")) return false;
+    try{
+        new URL(`http://[${host}]/`);
+        return true;
+    }catch(e){
+        return false;
+    }
+}
+
+const TLS_VERSION_10=769,TLS_VERSION_12=771,TLS_VERSION_13=772;
+const CONTENT_TYPE_CHANGE_CIPHER_SPEC=20,CONTENT_TYPE_ALERT=21,CONTENT_TYPE_HANDSHAKE=22,CONTENT_TYPE_APPLICATION_DATA=23;
+const HANDSHAKE_TYPE_CLIENT_HELLO=1,HANDSHAKE_TYPE_SERVER_HELLO=2,HANDSHAKE_TYPE_NEW_SESSION_TICKET=4,HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS=8,HANDSHAKE_TYPE_CERTIFICATE=11,HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE=12,HANDSHAKE_TYPE_CERTIFICATE_REQUEST=13,HANDSHAKE_TYPE_SERVER_HELLO_DONE=14,HANDSHAKE_TYPE_CERTIFICATE_VERIFY=15,HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE=16,HANDSHAKE_TYPE_FINISHED=20,HANDSHAKE_TYPE_KEY_UPDATE=24;
+const EXT_SERVER_NAME=0,EXT_SUPPORTED_GROUPS=10,EXT_EC_POINT_FORMATS=11,EXT_SIGNATURE_ALGORITHMS=13,EXT_APPLICATION_LAYER_PROTOCOL_NEGOTIATION=16,EXT_SUPPORTED_VERSIONS=43,EXT_PSK_KEY_EXCHANGE_MODES=45,EXT_KEY_SHARE=51;
+
+const ALERT_CLOSE_NOTIFY=0,ALERT_LEVEL_WARNING=1,ALERT_UNRECOGNIZED_NAME=112;
+const shouldIgnoreTlsAlert=(fragment)=>fragment?.[0]===ALERT_LEVEL_WARNING&&fragment?.[1]===ALERT_UNRECOGNIZED_NAME;
+
+const CIPHER_SUITES_BY_ID=new Map([
+    [4865,{id:4865,keyLen:16,ivLen:12,hash:"SHA-256",tls13:!0}],
+    [4866,{id:4866,keyLen:32,ivLen:12,hash:"SHA-384",tls13:!0}],
+    [4867,{id:4867,keyLen:32,ivLen:12,hash:"SHA-256",tls13:!0,chacha:!0}],
+    [49199,{id:49199,keyLen:16,ivLen:4,hash:"SHA-256",kex:"ECDHE"}],
+    [49200,{id:49200,keyLen:32,ivLen:4,hash:"SHA-384",kex:"ECDHE"}],
+    [52392,{id:52392,keyLen:32,ivLen:12,hash:"SHA-256",kex:"ECDHE",chacha:!0}],
+    [49195,{id:49195,keyLen:16,ivLen:4,hash:"SHA-256",kex:"ECDHE"}],
+    [49196,{id:49196,keyLen:32,ivLen:4,hash:"SHA-384",kex:"ECDHE"}],
+    [52393,{id:52393,keyLen:32,ivLen:12,hash:"SHA-256",kex:"ECDHE",chacha:!0}]
+]);
+const GROUPS_BY_ID=new Map([[29,"X25519"],[23,"P-256"]]);
+const SUPPORTED_SIGNATURE_ALGORITHMS=[2052,2053,2054,1025,1281,1537,1027,1283,1539];
+
+const tlsBytes=(...parts)=>{
+    const flattenBytes=(values)=>values.flatMap((value)=>value instanceof Uint8Array?[...value]:Array.isArray(value)?flattenBytes(value):"number"==typeof value?[value]:[]);
+    return new Uint8Array(flattenBytes(parts));
+};
+const uint16be=(value)=>[value>>8&255,255&value];
+const readUint24=(buffer,offset)=>buffer[offset]<<16|buffer[offset+1]<<8|buffer[offset+2];
+const randomBytes=(length)=>crypto.getRandomValues(new Uint8Array(length));
+const constantTimeEqual=(left,right)=>{
+    if(!left||!right||left.length!==right.length) return !1;
+    let diff=0;
+    for(let index=0;index<left.length;index++) diff|=left[index]^right[index];
+    return 0===diff;
+};
+const hashByteLength=(hash)=>"SHA-512"===hash?64:"SHA-384"===hash?48:32;
+async function hmac(hash,key,data){
+    const cryptoKey=await crypto.subtle.importKey("raw",key,{name:"HMAC",hash},!1,["sign"]);
+    return new Uint8Array(await crypto.subtle.sign("HMAC",cryptoKey,data));
+}
+async function digestBytes(hash,data){return new Uint8Array(await crypto.subtle.digest(hash,data));}
+async function tls12Prf(secret,label,seed,length,hash="SHA-256"){
+    const labelSeed=concatBytes(textEncoder.encode(label),seed);
+    let output=new Uint8Array(0),currentA=labelSeed;
+    for(;output.length<length;){
+        currentA=await hmac(hash,secret,currentA);
+        const block=await hmac(hash,secret,concatBytes(currentA,labelSeed));
+        output=concatBytes(output,block);
+    }
+    return output.slice(0,length);
+}
+async function hkdfExtract(hash,salt,inputKeyMaterial){
+    return salt&&salt.length||(salt=new Uint8Array(hashByteLength(hash))),hmac(hash,salt,inputKeyMaterial);
+}
+async function hkdfExpandLabel(hash,secret,label,context,length){
+    const fullLabel=textEncoder.encode("tls13 "+label);
+    return async function(hash,secret,info,length){
+        const hashLen=hashByteLength(hash),roundCount=Math.ceil(length/hashLen);
+        let output=new Uint8Array(0),previousBlock=new Uint8Array(0);
+        for(let round=1;round<=roundCount;round++) previousBlock=await hmac(hash,secret,concatBytes(previousBlock,info,[round])),output=concatBytes(output,previousBlock);
+        return output.slice(0,length);
+    }(hash,secret,tlsBytes(uint16be(length),fullLabel.length,fullLabel,context.length,context),length);
+}
+async function generateKeyShare(group="P-256"){
+    const algorithm="X25519"===group?{name:"X25519"}:{name:"ECDH",namedCurve:group};
+    const keyPair=await crypto.subtle.generateKey(algorithm,!0,["deriveBits"]);
+    const publicKeyRaw=await crypto.subtle.exportKey("raw",keyPair.publicKey);
+    return {keyPair,publicKeyRaw:new Uint8Array(publicKeyRaw)};
+}
+async function deriveSharedSecret(privateKey,peerPublicKey,group="P-256"){
+    const algorithm="X25519"===group?{name:"X25519"}:{name:"ECDH",namedCurve:group},
+        peerKey=await crypto.subtle.importKey("raw",peerPublicKey,algorithm,!1,[]),
+        bits="P-384"===group?384:"P-521"===group?528:256;
+    return new Uint8Array(await crypto.subtle.deriveBits({name:algorithm.name,public:peerKey},privateKey,bits));
+}
+async function importAesGcmKey(key,usages){return crypto.subtle.importKey("raw",key,{name:"AES-GCM"},!1,usages);}
+async function aesGcmEncryptWithKey(cryptoKey,initializationVector,plaintext,additionalData){
+    return new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv:initializationVector,additionalData,tagLength:128},cryptoKey,plaintext));
+}
+async function aesGcmDecryptWithKey(cryptoKey,initializationVector,ciphertext,additionalData){
+    return new Uint8Array(await crypto.subtle.decrypt({name:"AES-GCM",iv:initializationVector,additionalData,tagLength:128},cryptoKey,ciphertext));
+}
+
+function rotateLeft32(value,bits){return (value<<bits|value>>>32-bits)>>>0;}
+
+function chachaQuarterRound(state,indexA,indexB,indexC,indexD){
+    state[indexA]=state[indexA]+state[indexB]>>>0,state[indexD]=rotateLeft32(state[indexD]^state[indexA],16),state[indexC]=state[indexC]+state[indexD]>>>0,state[indexB]=rotateLeft32(state[indexB]^state[indexC],12),state[indexA]=state[indexA]+state[indexB]>>>0,state[indexD]=rotateLeft32(state[indexD]^state[indexA],8),state[indexC]=state[indexC]+state[indexD]>>>0,state[indexB]=rotateLeft32(state[indexB]^state[indexC],7);
+}
+
+function chacha20Block(key,counter,nonce){
+    const state=new Uint32Array(16);
+    state[0]=1634760805,state[1]=857760878,state[2]=2036477234,state[3]=1797285236;
+    const keyView=new DataView(key.buffer,key.byteOffset,key.byteLength);
+    for(let wordIndex=0;wordIndex<8;wordIndex++) state[4+wordIndex]=keyView.getUint32(4*wordIndex,!0);
+    state[12]=counter;
+    const nonceView=new DataView(nonce.buffer,nonce.byteOffset,nonce.byteLength);
+    state[13]=nonceView.getUint32(0,!0),state[14]=nonceView.getUint32(4,!0),state[15]=nonceView.getUint32(8,!0);
+    const workingState=new Uint32Array(state);
+    for(let round=0;round<10;round++) chachaQuarterRound(workingState,0,4,8,12),chachaQuarterRound(workingState,1,5,9,13),chachaQuarterRound(workingState,2,6,10,14),chachaQuarterRound(workingState,3,7,11,15),chachaQuarterRound(workingState,0,5,10,15),chachaQuarterRound(workingState,1,6,11,12),chachaQuarterRound(workingState,2,7,8,13),chachaQuarterRound(workingState,3,4,9,14);
+    for(let wordIndex=0;wordIndex<16;wordIndex++) workingState[wordIndex]=workingState[wordIndex]+state[wordIndex]>>>0;
+    return new Uint8Array(workingState.buffer.slice(0));
+}
+
+function chacha20Xor(key,nonce,data){
+    const output=new Uint8Array(data.length);
+    let counter=1;
+    for(let offset=0;offset<data.length;offset+=64){
+        const block=chacha20Block(key,counter++,nonce),
+            blockLength=Math.min(64,data.length-offset);
+        for(let index=0;index<blockLength;index++) output[offset+index]=data[offset+index]^block[index];
+    }
+    return output;
+}
+
+function poly1305Mac(key,message){
+    const rKey=function(rBytes){
+        const clamped=new Uint8Array(rBytes);
+        return clamped[3]&=15,clamped[7]&=15,clamped[11]&=15,clamped[15]&=15,clamped[4]&=252,clamped[8]&=252,clamped[12]&=252,clamped;
+    }(key.slice(0,16)),
+        sKey=key.slice(16,32);
+    let accumulator=[0n,0n,0n,0n,0n];
+    const rLimbs=[0x3ffffffn&BigInt(rKey[0]|rKey[1]<<8|rKey[2]<<16|rKey[3]<<24),0x3ffffffn&BigInt(rKey[3]>>2|rKey[4]<<6|rKey[5]<<14|rKey[6]<<22),0x3ffffffn&BigInt(rKey[6]>>4|rKey[7]<<4|rKey[8]<<12|rKey[9]<<20),0x3ffffffn&BigInt(rKey[9]>>6|rKey[10]<<2|rKey[11]<<10|rKey[12]<<18),0x3ffffffn&BigInt(rKey[13]|rKey[14]<<8|rKey[15]<<16)];
+    for(let offset=0;offset<message.length;offset+=16){
+        const chunk=message.slice(offset,offset+16),
+            paddedChunk=new Uint8Array(17);
+        paddedChunk.set(chunk),paddedChunk[chunk.length]=1,accumulator[0]+=BigInt(paddedChunk[0]|paddedChunk[1]<<8|paddedChunk[2]<<16|(3&paddedChunk[3])<<24),accumulator[1]+=BigInt(paddedChunk[3]>>2|paddedChunk[4]<<6|paddedChunk[5]<<14|(15&paddedChunk[6])<<22),accumulator[2]+=BigInt(paddedChunk[6]>>4|paddedChunk[7]<<4|paddedChunk[8]<<12|(63&paddedChunk[9])<<20),accumulator[3]+=BigInt(paddedChunk[9]>>6|paddedChunk[10]<<2|paddedChunk[11]<<10|paddedChunk[12]<<18),accumulator[4]+=BigInt(paddedChunk[13]|paddedChunk[14]<<8|paddedChunk[15]<<16|paddedChunk[16]<<24);
+        const product=[0n,0n,0n,0n,0n];
+        for(let accIndex=0;accIndex<5;accIndex++)
+            for(let rIndex=0;rIndex<5;rIndex++){
+                const limbIndex=accIndex+rIndex;
+                limbIndex<5?product[limbIndex]+=accumulator[accIndex]*rLimbs[rIndex]:product[limbIndex-5]+=accumulator[accIndex]*rLimbs[rIndex]*5n;
+            }
+        let carry=0n;
+        for(let index=0;index<5;index++) product[index]+=carry,accumulator[index]=0x3ffffffn&product[index],carry=product[index]>>26n;
+        accumulator[0]+=5n*carry,carry=accumulator[0]>>26n,accumulator[0]&=0x3ffffffn,accumulator[1]+=carry;
+    }
+    let tagValue=accumulator[0]|accumulator[1]<<26n|accumulator[2]<<52n|accumulator[3]<<78n|accumulator[4]<<104n;
+    tagValue=tagValue+sKey.reduce((total,byte,index)=>total+(BigInt(byte)<<BigInt(8*index)),0n)&(1n<<128n)-1n;
+    const tag=new Uint8Array(16);
+    for(let index=0;index<16;index++) tag[index]=Number(tagValue>>BigInt(8*index)&0xffn);
+    return tag;
+}
+
+function chacha20Poly1305Encrypt(key,nonce,plaintext,additionalData){
+    const polyKey=chacha20Block(key,0,nonce).slice(0,32),
+        ciphertext=chacha20Xor(key,nonce,plaintext),
+        aadPadding=(16-additionalData.length%16)%16,
+        ciphertextPadding=(16-ciphertext.length%16)%16,
+        macData=new Uint8Array(additionalData.length+aadPadding+ciphertext.length+ciphertextPadding+16);
+    macData.set(additionalData,0),macData.set(ciphertext,additionalData.length+aadPadding);
+    const lengthView=new DataView(macData.buffer,additionalData.length+aadPadding+ciphertext.length+ciphertextPadding);
+    lengthView.setBigUint64(0,BigInt(additionalData.length),!0),lengthView.setBigUint64(8,BigInt(ciphertext.length),!0);
+    const tag=poly1305Mac(polyKey,macData);
+    return concatBytes(ciphertext,tag);
+}
+
+function chacha20Poly1305Decrypt(key,nonce,ciphertext,additionalData){
+    if(ciphertext.length<16) throw new Error("Ciphertext too short");
+    const tag=ciphertext.slice(-16),
+        encryptedData=ciphertext.slice(0,-16),
+        polyKey=chacha20Block(key,0,nonce).slice(0,32),
+        aadPadding=(16-additionalData.length%16)%16,
+        ciphertextPadding=(16-encryptedData.length%16)%16,
+        macData=new Uint8Array(additionalData.length+aadPadding+encryptedData.length+ciphertextPadding+16);
+    macData.set(additionalData,0),macData.set(encryptedData,additionalData.length+aadPadding);
+    const lengthView=new DataView(macData.buffer,additionalData.length+aadPadding+encryptedData.length+ciphertextPadding);
+    lengthView.setBigUint64(0,BigInt(additionalData.length),!0),lengthView.setBigUint64(8,BigInt(encryptedData.length),!0);
+    const expectedTag=poly1305Mac(polyKey,macData);
+    let diff=0;
+    for(let index=0;index<16;index++) diff|=tag[index]^expectedTag[index];
+    if(0!==diff) throw new Error("ChaCha20-Poly1305 authentication failed");
+    return chacha20Xor(key,nonce,encryptedData);
+}
+
+const TLS_MAX_PLAINTEXT_FRAGMENT=16*1024;
+function buildTlsRecord(contentType,fragment,version=TLS_VERSION_12){
+    const data=toUint8(fragment);
+    const record=new Uint8Array(5+data.byteLength);
+    record[0]=contentType;
+    record[1]=version>>8&255;
+    record[2]=version&255;
+    record[3]=data.byteLength>>8&255;
+    record[4]=data.byteLength&255;
+    record.set(data,5);
+    return record;
+}
+function buildHandshakeMessage(handshakeType,body){return tlsBytes(handshakeType,(length=>[length>>16&255,length>>8&255,255&length])(body.length),body);}
+class TlsRecordParser{
+    constructor(){this.buffer=new Uint8Array(0);}
+    feed(chunk){
+        const bytes=toUint8(chunk);
+        this.buffer=this.buffer.length?concatBytes(this.buffer,bytes):bytes;
+    }
+    next(){
+        if(this.buffer.length<5) return null;
+        const contentType=this.buffer[0],
+            version=readUint16(this.buffer,1),
+            length=readUint16(this.buffer,3);
+        if(this.buffer.length<5+length) return null;
+        const fragment=this.buffer.subarray(5,5+length);
+        return this.buffer=this.buffer.subarray(5+length),{type:contentType,version,length,fragment};
+    }
+}
+class TlsHandshakeParser{
+    constructor(){this.buffer=new Uint8Array(0);}
+    feed(chunk){
+        const bytes=toUint8(chunk);
+        this.buffer=this.buffer.length?concatBytes(this.buffer,bytes):bytes;
+    }
+    next(){
+        if(this.buffer.length<4) return null;
+        const handshakeType=this.buffer[0],
+            length=readUint24(this.buffer,1);
+        if(this.buffer.length<4+length) return null;
+        const body=this.buffer.subarray(4,4+length),
+            raw=this.buffer.subarray(0,4+length);
+        return this.buffer=this.buffer.subarray(4+length),{type:handshakeType,length,body,raw};
+    }
+}
+
+function parseServerHello(body){
+    let offset=0;
+    const legacyVersion=readUint16(body,offset);
+    offset+=2;
+    const serverRandom=body.slice(offset,offset+32);
+    offset+=32;
+    const sessionIdLength=body[offset++],
+        sessionId=body.slice(offset,offset+sessionIdLength);
+    offset+=sessionIdLength;
+    const cipherSuite=readUint16(body,offset);
+    offset+=2;
+    const compression=body[offset++];
+    let selectedVersion=legacyVersion,
+        keyShare=null,
+        alpn=null;
+    if(offset<body.length){
+        const extensionsLength=readUint16(body,offset);
+        offset+=2;
+        const extensionsEnd=offset+extensionsLength;
+        for(;offset+4<=extensionsEnd;){
+            const extensionType=readUint16(body,offset);
+            offset+=2;
+            const extensionLength=readUint16(body,offset);
+            offset+=2;
+            const extensionData=body.slice(offset,offset+extensionLength);
+            if(offset+=extensionLength,extensionType===EXT_SUPPORTED_VERSIONS&&extensionLength>=2) selectedVersion=readUint16(extensionData,0);
+            else if(extensionType===EXT_KEY_SHARE&&extensionLength>=4){
+                const group=readUint16(extensionData,0),
+                    keyLength=readUint16(extensionData,2);
+                keyShare={group,key:extensionData.slice(4,4+keyLength)};
+            }else extensionType===EXT_APPLICATION_LAYER_PROTOCOL_NEGOTIATION&&extensionLength>=3&&(alpn=textDecoder.decode(extensionData.slice(3,3+extensionData[2])));
+        }
+    }
+    const helloRetryRequestRandom=new Uint8Array([207,33,173,116,229,154,97,17,190,29,140,2,30,101,184,145,194,162,17,22,122,187,140,94,7,158,9,226,200,168,51,156]);
+    return {version:legacyVersion,serverRandom,sessionId,cipherSuite,compression,selectedVersion,keyShare,alpn,isHRR:constantTimeEqual(serverRandom,helloRetryRequestRandom),isTls13:selectedVersion===TLS_VERSION_13};
+}
+
+function parseServerKeyExchange(body){
+    let offset=1;
+    const namedCurve=readUint16(body,offset);
+    offset+=2;
+    const keyLength=body[offset++];
+    return {namedCurve,serverPublicKey:body.slice(offset,offset+keyLength)};
+}
+
+function extractLeafCertificate(body,hasContext=0){
+    let offset=0;
+    if(hasContext){
+        const contextLength=body[offset++];
+        offset+=contextLength;
+    }
+    if(offset+3>body.length) return null;
+    const certificateListLength=readUint24(body,offset);
+    if(offset+=3,!certificateListLength||offset+3>body.length) return null;
+    const certificateLength=readUint24(body,offset);
+    return offset+=3,certificateLength?body.slice(offset,offset+certificateLength):null;
+}
+
+function parseEncryptedExtensions(body){
+    const parsed={alpn:null};
+    let offset=2;
+    const extensionsEnd=2+readUint16(body,0);
+    for(;offset+4<=extensionsEnd;){
+        const extensionType=readUint16(body,offset);
+        offset+=2;
+        const extensionLength=readUint16(body,offset);
+        if(offset+=2,extensionType===EXT_APPLICATION_LAYER_PROTOCOL_NEGOTIATION&&extensionLength>=3){
+            const protocolLength=body[offset+2];
+            protocolLength>0&&offset+3+protocolLength<=offset+extensionLength&&(parsed.alpn=textDecoder.decode(body.slice(offset+3,offset+3+protocolLength)));
+        }
+        offset+=extensionLength;
+    }
+    return parsed;
+}
+
+function buildClientHello(clientRandom,serverName,keyShares,{tls13:enableTls13=!0,tls12:enableTls12=!0,alpn=null,chacha=!0}={}){
+    const cipherIds=[];
+    enableTls13&&cipherIds.push(4865,4866,...(chacha?[4867]:[])),enableTls12&&cipherIds.push(49199,49200,49195,49196,...(chacha?[52392,52393]:[]));
+    const cipherBytes=tlsBytes(...cipherIds.flatMap(uint16be)),
+        extensions=[tlsBytes(255,1,0,1,0)];
+    if(serverName){
+        const serverNameBytes=textEncoder.encode(serverName),
+            serverNameList=tlsBytes(0,uint16be(serverNameBytes.length),serverNameBytes);
+        extensions.push(tlsBytes(uint16be(EXT_SERVER_NAME),uint16be(serverNameList.length+2),uint16be(serverNameList.length),serverNameList));
+    }
+    extensions.push(tlsBytes(uint16be(EXT_EC_POINT_FORMATS),0,2,1,0)),extensions.push(tlsBytes(uint16be(EXT_SUPPORTED_GROUPS),0,6,0,4,0,29,0,23));
+    const signatureBytes=tlsBytes(...SUPPORTED_SIGNATURE_ALGORITHMS.flatMap(uint16be));
+    extensions.push(tlsBytes(uint16be(EXT_SIGNATURE_ALGORITHMS),uint16be(signatureBytes.length+2),uint16be(signatureBytes.length),signatureBytes));
+    const protocols=Array.isArray(alpn)?alpn.filter(Boolean):alpn?[alpn]:[];
+    if(protocols.length){
+        const alpnBytes=concatBytes(...protocols.map((protocol)=>{const protocolBytes=textEncoder.encode(protocol);return tlsBytes(protocolBytes.length,protocolBytes);}));
+        extensions.push(tlsBytes(uint16be(EXT_APPLICATION_LAYER_PROTOCOL_NEGOTIATION),uint16be(alpnBytes.length+2),uint16be(alpnBytes.length),alpnBytes));
+    }
+    if(enableTls13&&keyShares){
+        let keyShareBytes;
+        if(extensions.push(enableTls12?tlsBytes(uint16be(EXT_SUPPORTED_VERSIONS),0,5,4,3,4,3,3):tlsBytes(uint16be(EXT_SUPPORTED_VERSIONS),0,3,2,3,4)),extensions.push(tlsBytes(uint16be(EXT_PSK_KEY_EXCHANGE_MODES),0,2,1,1)),keyShares?.x25519&&keyShares?.p256) keyShareBytes=concatBytes(tlsBytes(0,29,uint16be(keyShares.x25519.length),keyShares.x25519),tlsBytes(0,23,uint16be(keyShares.p256.length),keyShares.p256));
+        else if(keyShares?.x25519) keyShareBytes=tlsBytes(0,29,uint16be(keyShares.x25519.length),keyShares.x25519);
+        else if(keyShares?.p256) keyShareBytes=tlsBytes(0,23,uint16be(keyShares.p256.length),keyShares.p256);
+        else{
+            if(!(keyShares instanceof Uint8Array)) throw new Error("Invalid keyShares");
+            keyShareBytes=tlsBytes(0,23,uint16be(keyShares.length),keyShares);
+        }
+        extensions.push(tlsBytes(uint16be(EXT_KEY_SHARE),uint16be(keyShareBytes.length+2),uint16be(keyShareBytes.length),keyShareBytes));
+    }
+    const extensionsBytes=concatBytes(...extensions);
+    return buildHandshakeMessage(HANDSHAKE_TYPE_CLIENT_HELLO,tlsBytes(uint16be(TLS_VERSION_12),clientRandom,0,uint16be(cipherBytes.length),cipherBytes,1,0,uint16be(extensionsBytes.length),extensionsBytes));
+}
+const uint64be=(sequenceNumber)=>{const bytes=new Uint8Array(8);return new DataView(bytes.buffer).setBigUint64(0,sequenceNumber,!1),bytes;},
+    xorSequenceIntoIv=(initializationVector,sequenceNumber)=>{
+        const nonce=initializationVector.slice(),
+            sequenceBytes=uint64be(sequenceNumber);
+        for(let index=0;index<8;index++) nonce[nonce.length-8+index]^=sequenceBytes[index];
+        return nonce;
+    },
+    deriveTrafficKeys=(hash,secret,keyLen,ivLen)=>Promise.all([hkdfExpandLabel(hash,secret,"key",EMPTY_BYTES,keyLen),hkdfExpandLabel(hash,secret,"iv",EMPTY_BYTES,ivLen)]);
+class TlsSocket{
+    constructor(socket,options={}){
+        if(this.socket=socket,this.serverName=options.serverName||"",this.supportTls13=!1!==options.tls13,this.supportTls12=!1!==options.tls12,!this.supportTls13&&!this.supportTls12) throw new Error("At least one TLS version must be enabled");
+        this.alpnProtocols=Array.isArray(options.alpn)?options.alpn:options.alpn?[options.alpn]:null,this.allowChacha=options.allowChacha!==false,this.timeout=options.timeout??3e4,this.clientRandom=randomBytes(32),this.serverRandom=null,this.handshakeChunks=[],this.handshakeComplete=!1,this.negotiatedAlpn=null,this.cipherSuite=null,this.cipherConfig=null,this.isTls13=!1,this.masterSecret=null,this.handshakeSecret=null,this.clientWriteKey=null,this.serverWriteKey=null,this.clientWriteIv=null,this.serverWriteIv=null,this.clientHandshakeKey=null,this.serverHandshakeKey=null,this.clientHandshakeIv=null,this.serverHandshakeIv=null,this.clientAppKey=null,this.serverAppKey=null,this.clientAppIv=null,this.serverAppIv=null,this.clientWriteCryptoKey=null,this.serverWriteCryptoKey=null,this.clientHandshakeCryptoKey=null,this.serverHandshakeCryptoKey=null,this.clientAppCryptoKey=null,this.serverAppCryptoKey=null,this.clientSeqNum=0n,this.serverSeqNum=0n,this.recordParser=new TlsRecordParser,this.handshakeParser=new TlsHandshakeParser,this.keyPairs=new Map,this.ecdhKeyPair=null,this.sawCert=!1;
+    }
+    recordHandshake(chunk){this.handshakeChunks.push(chunk);}
+    transcript(){return 1===this.handshakeChunks.length?this.handshakeChunks[0]:concatBytes(...this.handshakeChunks);}
+    getCipherConfig(cipherSuite){return CIPHER_SUITES_BY_ID.get(cipherSuite)||null;}
+    async readChunk(reader){return this.timeout?Promise.race([reader.read(),new Promise(((resolve,reject)=>setTimeout((()=>reject(new Error("TLS read timeout"))),this.timeout)))]):reader.read();}
+    async readRecordsUntil(reader,predicate,closedError){
+        for(;;){
+            let record;
+            for(;record=this.recordParser.next();)
+                if(await predicate(record)) return;
+            const {value,done}=await this.readChunk(reader);
+            if(done) throw new Error(closedError);
+            this.recordParser.feed(value);
+        }
+    }
+    async readHandshakeUntil(reader,predicate,closedError){
+        for(let message;message=this.handshakeParser.next();)
+            if(await predicate(message)) return;
+        return this.readRecordsUntil(reader,(async(record)=>{
+            if(record.type===CONTENT_TYPE_ALERT){
+                if(shouldIgnoreTlsAlert(record.fragment)) return;
+                throw new Error(`TLS Alert: ${record.fragment[1]}`);
+            }
+            if(record.type===CONTENT_TYPE_HANDSHAKE){
+                this.handshakeParser.feed(record.fragment);
+                for(let message;message=this.handshakeParser.next();)
+                    if(await predicate(message)) return 1;
+            }
+        }),closedError);
+    }
+    async acceptCertificate(certificate){if(!certificate?.length) throw new Error("Empty certificate");this.sawCert=!0;}
+    async handshake(){
+        const [p256Share,x25519Share]=await Promise.all([generateKeyShare("P-256"),generateKeyShare("X25519")]);
+        this.keyPairs=new Map([[23,p256Share],[29,x25519Share]]),this.ecdhKeyPair=p256Share.keyPair;
+        const reader=this.socket.readable.getReader(),
+            writer=this.socket.writable.getWriter();
+        try{
+            const clientHello=buildClientHello(this.clientRandom,this.serverName,{x25519:x25519Share.publicKeyRaw,p256:p256Share.publicKeyRaw},{tls13:this.supportTls13,tls12:this.supportTls12,alpn:this.alpnProtocols,chacha:this.allowChacha});
+            this.recordHandshake(clientHello),await writer.write(buildTlsRecord(CONTENT_TYPE_HANDSHAKE,clientHello,TLS_VERSION_10));
+            const serverHello=await this.receiveServerHello(reader);
+            if(serverHello.isHRR) throw new Error("HelloRetryRequest is not supported");
+            if(serverHello.keyShare?.group&&this.keyPairs.has(serverHello.keyShare.group)){
+                const selectedKeyPair=this.keyPairs.get(serverHello.keyShare.group);
+                this.ecdhKeyPair=selectedKeyPair.keyPair;
+            }
+            serverHello.isTls13?await this.handshakeTls13(reader,writer,serverHello):await this.handshakeTls12(reader,writer),this.handshakeComplete=!0;
+        }finally{
+            reader.releaseLock(),writer.releaseLock();
+        }
+    }
+    async receiveServerHello(reader){
+        for(;;){
+            const {value,done}=await this.readChunk(reader);
+            if(done) throw new Error("Connection closed waiting for ServerHello");
+            let record;
+            for(this.recordParser.feed(value);record=this.recordParser.next();){
+                if(record.type===CONTENT_TYPE_ALERT){
+                    if(shouldIgnoreTlsAlert(record.fragment)) continue;
+                    throw new Error(`TLS Alert: level=${record.fragment[0]}, desc=${record.fragment[1]}`);
+                }
+                if(record.type!==CONTENT_TYPE_HANDSHAKE) continue;
+                let message;
+                for(this.handshakeParser.feed(record.fragment);message=this.handshakeParser.next();){
+                    if(message.type!==HANDSHAKE_TYPE_SERVER_HELLO) continue;
+                    this.recordHandshake(message.raw);
+                    const serverHello=parseServerHello(message.body);
+                    if(this.serverRandom=serverHello.serverRandom,this.cipherSuite=serverHello.cipherSuite,this.cipherConfig=this.getCipherConfig(serverHello.cipherSuite),this.isTls13=serverHello.isTls13,this.negotiatedAlpn=serverHello.alpn||null,!this.cipherConfig) throw new Error(`Unsupported cipher suite: 0x${serverHello.cipherSuite.toString(16)}`);
+                    return serverHello;
+                }
+            }
+        }
+    }
+    async handshakeTls12(reader,writer){
+        let serverKeyExchange=null;
+        let sawServerHelloDone=!1;
+        let clientCertRequested=!1;
+        if(await this.readHandshakeUntil(reader,(async(message)=>{
+            switch(message.type){
+                case HANDSHAKE_TYPE_CERTIFICATE:{
+                    this.recordHandshake(message.raw);
+                    const certificate=extractLeafCertificate(message.body,1);
+                    if(!certificate) throw new Error("Missing TLS 1.2 certificate");
+                    await this.acceptCertificate(certificate);
+                    break;
+                }
+                case HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE:
+                    this.recordHandshake(message.raw),serverKeyExchange=parseServerKeyExchange(message.body);
+                    break;
+                case HANDSHAKE_TYPE_SERVER_HELLO_DONE:
+                    return this.recordHandshake(message.raw),sawServerHelloDone=!0,1;
+                case HANDSHAKE_TYPE_CERTIFICATE_REQUEST:
+                    this.recordHandshake(message.raw),clientCertRequested=!0;
+                    break;
+                default:
+                    this.recordHandshake(message.raw);
+            }
+        }),"Connection closed during TLS 1.2 handshake"),!this.sawCert) throw new Error("Missing TLS 1.2 leaf certificate");
+        const serverKeyExchangeData=serverKeyExchange;
+        if(!serverKeyExchangeData) throw new Error("Missing TLS 1.2 ServerKeyExchange");
+        const curveName=GROUPS_BY_ID.get(serverKeyExchangeData.namedCurve);
+        if(!curveName) throw new Error(`Unsupported named curve: 0x${serverKeyExchangeData.namedCurve.toString(16)}`);
+        const keyShare=this.keyPairs.get(serverKeyExchangeData.namedCurve);
+        if(!keyShare) throw new Error(`Missing key pair for curve: 0x${serverKeyExchangeData.namedCurve.toString(16)}`);
+        const preMasterSecret=await deriveSharedSecret(keyShare.keyPair.privateKey,serverKeyExchangeData.serverPublicKey,curveName),
+            clientKeyExchange=buildHandshakeMessage(HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE,tlsBytes(keyShare.publicKeyRaw.length,keyShare.publicKeyRaw));
+        if(clientCertRequested){
+            const emptyCertificate=buildHandshakeMessage(HANDSHAKE_TYPE_CERTIFICATE,tlsBytes(0,0,0));
+            this.recordHandshake(emptyCertificate),await writer.write(buildTlsRecord(CONTENT_TYPE_HANDSHAKE,emptyCertificate));
+        }
+        this.recordHandshake(clientKeyExchange);
+        const hashName=this.cipherConfig.hash;
+        this.masterSecret=await tls12Prf(preMasterSecret,"master secret",concatBytes(this.clientRandom,this.serverRandom),48,hashName);
+        const keyLen=this.cipherConfig.keyLen,
+            ivLen=this.cipherConfig.ivLen,
+            keyBlock=await tls12Prf(this.masterSecret,"key expansion",concatBytes(this.serverRandom,this.clientRandom),2*keyLen+2*ivLen,hashName);
+        this.clientWriteKey=keyBlock.slice(0,keyLen),this.serverWriteKey=keyBlock.slice(keyLen,2*keyLen),this.clientWriteIv=keyBlock.slice(2*keyLen,2*keyLen+ivLen),this.serverWriteIv=keyBlock.slice(2*keyLen+ivLen,2*keyLen+2*ivLen);
+        if(!this.cipherConfig.chacha) [this.clientWriteCryptoKey,this.serverWriteCryptoKey]=await Promise.all([importAesGcmKey(this.clientWriteKey,["encrypt"]),importAesGcmKey(this.serverWriteKey,["decrypt"])]);
+        await writer.write(buildTlsRecord(CONTENT_TYPE_HANDSHAKE,clientKeyExchange)),await writer.write(buildTlsRecord(CONTENT_TYPE_CHANGE_CIPHER_SPEC,tlsBytes(1)));
+        const clientVerifyData=await tls12Prf(this.masterSecret,"client finished",await digestBytes(hashName,this.transcript()),12,hashName),
+            finishedMessage=buildHandshakeMessage(HANDSHAKE_TYPE_FINISHED,clientVerifyData);
+        this.recordHandshake(finishedMessage),await writer.write(buildTlsRecord(CONTENT_TYPE_HANDSHAKE,await this.encryptTls12(finishedMessage,CONTENT_TYPE_HANDSHAKE)));
+        let sawChangeCipherSpec=!1;
+        await this.readRecordsUntil(reader,(async(record)=>{
+            if(record.type===CONTENT_TYPE_ALERT){
+                if(shouldIgnoreTlsAlert(record.fragment)) return;
+                throw new Error(`TLS Alert: ${record.fragment[1]}`);
+            }
+            if(record.type===CONTENT_TYPE_CHANGE_CIPHER_SPEC) return void(sawChangeCipherSpec=!0);
+            if(record.type!==CONTENT_TYPE_HANDSHAKE||!sawChangeCipherSpec) return;
+            const decrypted=await this.decryptTls12(record.fragment,CONTENT_TYPE_HANDSHAKE);
+            if(decrypted[0]!==HANDSHAKE_TYPE_FINISHED) return;
+            const verifyLength=readUint24(decrypted,1),
+                verifyData=decrypted.slice(4,4+verifyLength),
+                expectedVerifyData=await tls12Prf(this.masterSecret,"server finished",await digestBytes(hashName,this.transcript()),12,hashName);
+            if(!constantTimeEqual(verifyData,expectedVerifyData)) throw new Error("TLS 1.2 server Finished verify failed");
+            return 1;
+        }),"Connection closed waiting for TLS 1.2 Finished");
+    }
+    async handshakeTls13(reader,writer,serverHello){
+        const groupName=GROUPS_BY_ID.get(serverHello.keyShare?.group);
+        if(!groupName||!serverHello.keyShare?.key?.length) throw new Error("Missing TLS 1.3 key_share");
+        const hashName=this.cipherConfig.hash,
+            hashLen=hashByteLength(hashName),
+            keyLen=this.cipherConfig.keyLen,
+            ivLen=this.cipherConfig.ivLen,
+            sharedSecret=await deriveSharedSecret(this.ecdhKeyPair.privateKey,serverHello.keyShare.key,groupName),
+            earlySecret=await hkdfExtract(hashName,null,new Uint8Array(hashLen)),
+            derivedSecret=await hkdfExpandLabel(hashName,earlySecret,"derived",await digestBytes(hashName,EMPTY_BYTES),hashLen);
+        this.handshakeSecret=await hkdfExtract(hashName,derivedSecret,sharedSecret);
+        const transcriptHash=await digestBytes(hashName,this.transcript()),
+            clientHandshakeTrafficSecret=await hkdfExpandLabel(hashName,this.handshakeSecret,"c hs traffic",transcriptHash,hashLen),
+            serverHandshakeTrafficSecret=await hkdfExpandLabel(hashName,this.handshakeSecret,"s hs traffic",transcriptHash,hashLen);
+        [this.clientHandshakeKey,this.clientHandshakeIv]=await deriveTrafficKeys(hashName,clientHandshakeTrafficSecret,keyLen,ivLen),[this.serverHandshakeKey,this.serverHandshakeIv]=await deriveTrafficKeys(hashName,serverHandshakeTrafficSecret,keyLen,ivLen);
+        if(!this.cipherConfig.chacha) [this.clientHandshakeCryptoKey,this.serverHandshakeCryptoKey]=await Promise.all([importAesGcmKey(this.clientHandshakeKey,["encrypt"]),importAesGcmKey(this.serverHandshakeKey,["decrypt"])]);
+        const serverFinishedKey=await hkdfExpandLabel(hashName,serverHandshakeTrafficSecret,"finished",EMPTY_BYTES,hashLen);
+        let serverFinishedReceived=!1;
+        let clientCertRequested=!1;
+        const handleHandshakeMessage=async(message)=>{
+            switch(message.type){
+                case HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS:{
+                    const encryptedExtensions=parseEncryptedExtensions(message.body);
+                    encryptedExtensions.alpn&&(this.negotiatedAlpn=encryptedExtensions.alpn),this.recordHandshake(message.raw);
+                    break;
+                }
+                case HANDSHAKE_TYPE_CERTIFICATE:{
+                    const certificate=extractLeafCertificate(message.body);
+                    if(!certificate) throw new Error("Missing TLS 1.3 certificate");
+                    await this.acceptCertificate(certificate),this.recordHandshake(message.raw);
+                    break;
+                }
+                case HANDSHAKE_TYPE_CERTIFICATE_REQUEST:
+                    this.recordHandshake(message.raw),clientCertRequested=!0;
+                    break;
+                case HANDSHAKE_TYPE_CERTIFICATE_VERIFY:
+                    this.recordHandshake(message.raw);
+                    break;
+                case HANDSHAKE_TYPE_FINISHED:{
+                    const expectedVerifyData=await hmac(hashName,serverFinishedKey,await digestBytes(hashName,this.transcript()));
+                    if(!constantTimeEqual(expectedVerifyData,message.body)) throw new Error("TLS 1.3 server Finished verify failed");
+                    this.recordHandshake(message.raw),serverFinishedReceived=!0;
+                    break;
+                }
+                default:
+                    this.recordHandshake(message.raw);
+            }
+        };
+        await this.readRecordsUntil(reader,(async(record)=>{
+            if(record.type===CONTENT_TYPE_CHANGE_CIPHER_SPEC||record.type===CONTENT_TYPE_HANDSHAKE) return;
+            if(record.type===CONTENT_TYPE_ALERT){
+                if(shouldIgnoreTlsAlert(record.fragment)) return;
+                throw new Error(`TLS Alert: ${record.fragment[1]}`);
+            }
+            if(record.type!==CONTENT_TYPE_APPLICATION_DATA) return;
+            const decrypted=await this.decryptTls13Handshake(record.fragment),
+                innerType=decrypted[decrypted.length-1],
+                plaintext=decrypted.slice(0,-1);
+            if(innerType===CONTENT_TYPE_HANDSHAKE){
+                this.handshakeParser.feed(plaintext);
+                for(let message;message=this.handshakeParser.next();)
+                    if(await handleHandshakeMessage(message),serverFinishedReceived) return 1;
+            }
+        }),"Connection closed during TLS 1.3 handshake");
+        const applicationTranscriptHash=await digestBytes(hashName,this.transcript()),
+            masterDerivedSecret=await hkdfExpandLabel(hashName,this.handshakeSecret,"derived",await digestBytes(hashName,EMPTY_BYTES),hashLen),
+            masterSecret=await hkdfExtract(hashName,masterDerivedSecret,new Uint8Array(hashLen)),
+            clientAppTrafficSecret=await hkdfExpandLabel(hashName,masterSecret,"c ap traffic",applicationTranscriptHash,hashLen),
+            serverAppTrafficSecret=await hkdfExpandLabel(hashName,masterSecret,"s ap traffic",applicationTranscriptHash,hashLen);
+        [this.clientAppKey,this.clientAppIv]=await deriveTrafficKeys(hashName,clientAppTrafficSecret,keyLen,ivLen),[this.serverAppKey,this.serverAppIv]=await deriveTrafficKeys(hashName,serverAppTrafficSecret,keyLen,ivLen);
+        if(!this.cipherConfig.chacha) [this.clientAppCryptoKey,this.serverAppCryptoKey]=await Promise.all([importAesGcmKey(this.clientAppKey,["encrypt"]),importAesGcmKey(this.serverAppKey,["decrypt"])]);
+        let clientFlightHandshake=EMPTY_BYTES;
+        if(clientCertRequested) clientFlightHandshake=buildHandshakeMessage(HANDSHAKE_TYPE_CERTIFICATE,tlsBytes(0,0,0,0)),this.recordHandshake(clientFlightHandshake);
+        const clientFinishedKey=await hkdfExpandLabel(hashName,clientHandshakeTrafficSecret,"finished",EMPTY_BYTES,hashLen),
+            clientFinishedVerifyData=await hmac(hashName,clientFinishedKey,await digestBytes(hashName,this.transcript())),
+            clientFinishedMessage=buildHandshakeMessage(HANDSHAKE_TYPE_FINISHED,clientFinishedVerifyData);
+        this.recordHandshake(clientFinishedMessage),await writer.write(buildTlsRecord(CONTENT_TYPE_APPLICATION_DATA,await this.encryptTls13Handshake(concatBytes(clientFlightHandshake,clientFinishedMessage,[CONTENT_TYPE_HANDSHAKE])))),this.clientSeqNum=0n,this.serverSeqNum=0n;
+    }
+    async encryptTls12(plaintext,contentType){
+        const sequenceNumber=this.clientSeqNum++,
+            sequenceBytes=uint64be(sequenceNumber),
+            additionalData=concatBytes(sequenceBytes,[contentType],uint16be(TLS_VERSION_12),uint16be(plaintext.length));
+        if(this.cipherConfig.chacha){
+            const nonce=xorSequenceIntoIv(this.clientWriteIv,sequenceNumber);
+            return chacha20Poly1305Encrypt(this.clientWriteKey,nonce,plaintext,additionalData);
+        }
+        const explicitNonce=randomBytes(8);
+        if(!this.clientWriteCryptoKey) this.clientWriteCryptoKey=await importAesGcmKey(this.clientWriteKey,["encrypt"]);
+        return concatBytes(explicitNonce,await aesGcmEncryptWithKey(this.clientWriteCryptoKey,concatBytes(this.clientWriteIv,explicitNonce),plaintext,additionalData));
+    }
+    async decryptTls12(ciphertext,contentType){
+        const sequenceNumber=this.serverSeqNum++,
+            sequenceBytes=uint64be(sequenceNumber);
+        if(this.cipherConfig.chacha){
+            const nonce=xorSequenceIntoIv(this.serverWriteIv,sequenceNumber);
+            return chacha20Poly1305Decrypt(this.serverWriteKey,nonce,ciphertext,concatBytes(sequenceBytes,[contentType],uint16be(TLS_VERSION_12),uint16be(ciphertext.length-16)));
+        }
+        const explicitNonce=ciphertext.subarray(0,8),
+            encryptedData=ciphertext.subarray(8);
+        if(!this.serverWriteCryptoKey) this.serverWriteCryptoKey=await importAesGcmKey(this.serverWriteKey,["decrypt"]);
+        return aesGcmDecryptWithKey(this.serverWriteCryptoKey,concatBytes(this.serverWriteIv,explicitNonce),encryptedData,concatBytes(sequenceBytes,[contentType],uint16be(TLS_VERSION_12),uint16be(encryptedData.length-16)));
+    }
+    async encryptTls13Handshake(plaintext){
+        const nonce=xorSequenceIntoIv(this.clientHandshakeIv,this.clientSeqNum++),
+            additionalData=tlsBytes(CONTENT_TYPE_APPLICATION_DATA,3,3,uint16be(plaintext.length+16));
+        if(this.cipherConfig.chacha) return chacha20Poly1305Encrypt(this.clientHandshakeKey,nonce,plaintext,additionalData);
+        if(!this.clientHandshakeCryptoKey) this.clientHandshakeCryptoKey=await importAesGcmKey(this.clientHandshakeKey,["encrypt"]);
+        return aesGcmEncryptWithKey(this.clientHandshakeCryptoKey,nonce,plaintext,additionalData);
+    }
+    async decryptTls13Handshake(ciphertext){
+        const nonce=xorSequenceIntoIv(this.serverHandshakeIv,this.serverSeqNum++),
+            additionalData=tlsBytes(CONTENT_TYPE_APPLICATION_DATA,3,3,uint16be(ciphertext.length));
+        const decrypted=this.cipherConfig.chacha?await chacha20Poly1305Decrypt(this.serverHandshakeKey,nonce,ciphertext,additionalData):await aesGcmDecryptWithKey(this.serverHandshakeCryptoKey||(this.serverHandshakeCryptoKey=await importAesGcmKey(this.serverHandshakeKey,["decrypt"])),nonce,ciphertext,additionalData);
+        let innerTypeIndex=decrypted.length-1;
+        for(;innerTypeIndex>=0&&!decrypted[innerTypeIndex];) innerTypeIndex--;
+        return innerTypeIndex<0?EMPTY_BYTES:decrypted.slice(0,innerTypeIndex+1);
+    }
+    async encryptTls13(data){
+        const plaintext=concatBytes(data,[CONTENT_TYPE_APPLICATION_DATA]),
+            nonce=xorSequenceIntoIv(this.clientAppIv,this.clientSeqNum++),
+            additionalData=tlsBytes(CONTENT_TYPE_APPLICATION_DATA,3,3,uint16be(plaintext.length+16));
+        if(this.cipherConfig.chacha) return chacha20Poly1305Encrypt(this.clientAppKey,nonce,plaintext,additionalData);
+        if(!this.clientAppCryptoKey) this.clientAppCryptoKey=await importAesGcmKey(this.clientAppKey,["encrypt"]);
+        return aesGcmEncryptWithKey(this.clientAppCryptoKey,nonce,plaintext,additionalData);
+    }
+    async decryptTls13(ciphertext){
+        const nonce=xorSequenceIntoIv(this.serverAppIv,this.serverSeqNum++),
+            additionalData=tlsBytes(CONTENT_TYPE_APPLICATION_DATA,3,3,uint16be(ciphertext.length)),
+            plaintext=this.cipherConfig.chacha?await chacha20Poly1305Decrypt(this.serverAppKey,nonce,ciphertext,additionalData):await aesGcmDecryptWithKey(this.serverAppCryptoKey||(this.serverAppCryptoKey=await importAesGcmKey(this.serverAppKey,["decrypt"])),nonce,ciphertext,additionalData);
+        let innerTypeIndex=plaintext.length-1;
+        for(;innerTypeIndex>=0&&!plaintext[innerTypeIndex];) innerTypeIndex--;
+        if(innerTypeIndex<0) return {data:EMPTY_BYTES,type:0};
+        return {data:plaintext.slice(0,innerTypeIndex),type:plaintext[innerTypeIndex]};
+    }
+    async write(data){
+        if(!this.handshakeComplete) throw new Error("Handshake not complete");
+        const plaintext=toUint8(data);
+        if(!plaintext.byteLength) return;
+        const writer=this.socket.writable.getWriter();
+        try{
+            const records=[];
+            for(let offset=0;offset<plaintext.byteLength;offset+=TLS_MAX_PLAINTEXT_FRAGMENT){
+                const chunk=plaintext.subarray(offset,Math.min(offset+TLS_MAX_PLAINTEXT_FRAGMENT,plaintext.byteLength));
+                const encrypted=this.isTls13?await this.encryptTls13(chunk):await this.encryptTls12(chunk,CONTENT_TYPE_APPLICATION_DATA);
+                records.push(buildTlsRecord(CONTENT_TYPE_APPLICATION_DATA,encrypted));
+            }
+            await writer.write(records.length===1?records[0]:concatBytes(...records));
+        }finally{
+            writer.releaseLock();
+        }
+    }
+    async read(){
+        for(;;){
+            let record;
+            for(;record=this.recordParser.next();){
+                if(record.type===CONTENT_TYPE_ALERT){
+                    if(record.fragment[1]===ALERT_CLOSE_NOTIFY) return null;
+                    throw new Error(`TLS Alert: ${record.fragment[1]}`);
+                }
+                if(record.type!==CONTENT_TYPE_APPLICATION_DATA) continue;
+                if(!this.isTls13) return this.decryptTls12(record.fragment,CONTENT_TYPE_APPLICATION_DATA);
+                const {data,type}=await this.decryptTls13(record.fragment);
+                if(type===CONTENT_TYPE_APPLICATION_DATA) return data;
+                if(type===CONTENT_TYPE_ALERT){
+                    if(data[1]===ALERT_CLOSE_NOTIFY) return null;
+                    throw new Error(`TLS Alert: ${data[1]}`);
+                }
+                if(type!==CONTENT_TYPE_HANDSHAKE) continue;
+                let message;
+                for(this.handshakeParser.feed(data);message=this.handshakeParser.next();)
+                    if(message.type!==HANDSHAKE_TYPE_NEW_SESSION_TICKET&&message.type===HANDSHAKE_TYPE_KEY_UPDATE) throw new Error("TLS 1.3 KeyUpdate is not supported");
+            }
+            const reader=this.socket.readable.getReader();
+            try{
+                const {value,done}=await this.readChunk(reader);
+                if(done) return null;
+                this.recordParser.feed(value);
+            }finally{
+                reader.releaseLock();
+            }
+        }
+    }
+    close(){this.socket.close();}
+}
+
+// HTTPS 代理建连：先自研 TLS 握手（不校验证书），再发 CONNECT
+async function httpsProxyConnect(targetHost,targetPort,initialData,proxyConfig){
+    const {username,password}=proxyConfig;
+    const host=stripIPv6Brackets(proxyConfig.host),port=proxyConfig.port;
+    let tlsSocket=null;
+    const tlsServerName=isIpAddress(host)?"":stripIPv6Brackets(host);
+    const openTls=async(allowChacha=false)=>{
+        const proxySocket=connect({hostname:host,port});
+        try{
+            await proxySocket.opened;
+            const socket=new TlsSocket(proxySocket,{serverName:tlsServerName,insecure:true,allowChacha});
+            await socket.handshake();
+            return socket;
+        }catch(error){
+            try{proxySocket.close();}catch(e){}
+            throw error;
+        }
+    };
+    try{
+        try{
+            tlsSocket=await openTls(false);
+        }catch(error){
+            if(!/cipher|handshake|TLS Alert|ServerHello|Finished|Unsupported|Missing TLS/i.test(error?.message||`${error||""}`)) throw error;
+            tlsSocket=await openTls(true);
+        }
+
+        const auth=username&&password?`Proxy-Authorization: Basic ${btoa(username+":"+password)}\r\n`:"";
+        const target=`${stripIPv6Brackets(targetHost)}:${targetPort}`;
+        const request=`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n${auth}User-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n`;
+        await tlsSocket.write(textEncoder.encode(request));
+
+        let responseBuffer=new Uint8Array(0),headerEndIndex=-1,bytesRead=0;
+        while(headerEndIndex===-1&&bytesRead<8192){
+            const value=await tlsSocket.read();
+            if(!value) throw new Error("HTTPS proxy closed before CONNECT response");
+            responseBuffer=concatBytes(responseBuffer,value);
+            bytesRead=responseBuffer.length;
+            const crlfcrlf=responseBuffer.findIndex((_,i)=>i<responseBuffer.length-3&&responseBuffer[i]===0x0d&&responseBuffer[i+1]===0x0a&&responseBuffer[i+2]===0x0d&&responseBuffer[i+3]===0x0a);
+            if(crlfcrlf!==-1) headerEndIndex=crlfcrlf+4;
+        }
+        if(headerEndIndex===-1) throw new Error("HTTPS proxy CONNECT response header too long or invalid");
+        const statusMatch=textDecoder.decode(responseBuffer.slice(0,headerEndIndex)).split("\r\n")[0].match(/HTTP\/\d\.\d\s+(\d+)/);
+        const statusCode=statusMatch?parseInt(statusMatch[1],10):NaN;
+        if(!Number.isFinite(statusCode)||statusCode<200||statusCode>=300) throw new Error("HTTPS proxy refused connection: HTTP "+statusCode);
+
+        if(toUint8(initialData).byteLength>0) await tlsSocket.write(toUint8(initialData));
+        const bufferedData=bytesRead>headerEndIndex?responseBuffer.subarray(headerEndIndex,bytesRead):null;
+        let closedSettled=!1,resolveClosed,rejectClosed;
+        const settleClosed=(settle,value)=>{
+            if(!closedSettled){
+                closedSettled=!0;
+                settle(value);
+            }
+        };
+        const closed=new Promise((resolve,reject)=>{
+            resolveClosed=resolve;
+            rejectClosed=reject;
+        });
+        const close=()=>{
+            try{tlsSocket.close();}catch(e){}
+            settleClosed(resolveClosed);
+        };
+        const readable=new ReadableStream({
+            async start(controller){
+                try{
+                    if(toUint8(bufferedData).byteLength>0) controller.enqueue(bufferedData);
+                    while(true){
+                        const data=await tlsSocket.read();
+                        if(!data) break;
+                        if(data.byteLength>0) controller.enqueue(data);
+                    }
+                    try{controller.close();}catch(e){}
+                    settleClosed(resolveClosed);
+                }catch(error){
+                    try{controller.error(error);}catch(e){}
+                    settleClosed(rejectClosed,error);
+                }
+            },
+            cancel(){
+                close();
+            },
+        });
+        const writable=new WritableStream({
+            async write(chunk){
+                await tlsSocket.write(toUint8(chunk));
+            },
+            close,
+            abort(error){
+                close();
+                if(error) settleClosed(rejectClosed,error);
+            },
+        });
+        return {readable,writable,closed,close};
+    }catch(error){
+        try{tlsSocket?.close();}catch(e){}
+        throw error;
+    }
+}
+
+// ---- SSTP 客户端：把只出 SSTP 的 VPN Gate 家宽节点当出口用 ----
 async function sstpConnect(proxyConfig,targetHost,targetPort){
     const username=proxyConfig.username??null,password=proxyConfig.password??null;
-    let buffer=SSTP_EMPTY_BYTES,pppId=1,socket=null,reader=null,writer=null;
+    let buffer=EMPTY_BYTES,pppId=1,socket=null,reader=null,writer=null;
     let settled=false,settleResolve,settleReject;
     const closed=new Promise((resolve,reject)=>{settleResolve=resolve;settleReject=reject;});
     const settle=(fn,value)=>{if(settled) return;settled=true;fn(value);};
@@ -557,7 +1338,7 @@ async function sstpConnect(proxyConfig,targetHost,targetPort){
         for(;;){
             const index=buffer.indexOf(10);
             if(index>=0){
-                const line=proxyTextDecoder.decode(buffer.subarray(0,index));
+                const line=textDecoder.decode(buffer.subarray(0,index));
                 buffer=buffer.subarray(index+1);
                 return line.replace(/\r$/,"");
             }
@@ -569,7 +1350,7 @@ async function sstpConnect(proxyConfig,targetHost,targetPort){
         const header=await withTimeout(readN(4),timeoutMs,"SSTP read timeout");
         const length=readUint16(header,2)&0x0fff;
         if(length<4) throw new Error("Invalid SSTP packet length");
-        return {isControl:(header[1]&1)!==0,body:length>4?await withTimeout(readN(length-4),timeoutMs,"SSTP body read timeout"):SSTP_EMPTY_BYTES};
+        return {isControl:(header[1]&1)!==0,body:length>4?await withTimeout(readN(length-4),timeoutMs,"SSTP body read timeout"):EMPTY_BYTES};
     };
     const packData=(pppFrame)=>{
         const length=6+pppFrame.byteLength,packet=new Uint8Array(length);
@@ -619,7 +1400,7 @@ async function sstpConnect(proxyConfig,targetHost,targetPort){
         writer=socket.writable.getWriter();
 
         const displayHost=serverHost.includes(":")?`[${serverHost}]`:serverHost;
-        const httpRequest=proxyTextEncoder.encode(
+        const httpRequest=textEncoder.encode(
             "SSTP_DUPLEX_POST /sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/ HTTP/1.1\r\n"
             +`Host: ${Number(serverPort)===443?displayHost:displayHost+":"+serverPort}\r\n`
             +"Content-Length: 18446744073709551615\r\n"
@@ -657,7 +1438,7 @@ async function sstpConnect(proxyConfig,targetHost,targetPort){
         const sendPap=async()=>{
             if(!localLcpAcked||!peerLcpAcked||!needsPap||papSent) return;
             if(username===null||password===null) throw new Error("SSTP server requires PAP authentication");
-            const userBytes=proxyTextEncoder.encode(username),passBytes=proxyTextEncoder.encode(password);
+            const userBytes=textEncoder.encode(username),passBytes=textEncoder.encode(password);
             if(userBytes.byteLength>255||passBytes.byteLength>255) throw new Error("SSTP username or password too long");
             const papLength=6+userBytes.byteLength+passBytes.byteLength;
             const frame=new Uint8Array(2+papLength),view=new DataView(frame.buffer);
@@ -753,7 +1534,7 @@ async function sstpConnect(proxyConfig,targetHost,targetPort){
         tcpPseudoHeader.set(sourceBytes);
         tcpPseudoHeader.set(targetBytes,4);
         tcpPseudoHeader[9]=6;
-        const buildTcpFrame=(flags,payload=SSTP_EMPTY_BYTES)=>{
+        const buildTcpFrame=(flags,payload=EMPTY_BYTES)=>{
             const bytes=toUint8(payload);
             const payloadLength=bytes.byteLength;
             const tcpLength=20+payloadLength;
@@ -1024,11 +1805,11 @@ async function turnConnect(proxyConfig,targetHost,targetPort){
             const nonce=message.attributes[TURN_STUN_ATTR.NONCE];
             if(!realmBytes||!nonce?.byteLength) throw new Error("TURN authentication challenge is missing realm or nonce");
 
-            const realm=proxyTextDecoder.decode(realmBytes);
-            integrityKey=new Uint8Array(await crypto.subtle.digest("MD5",proxyTextEncoder.encode(`${username}:${realm}:${password}`)));
+            const realm=textDecoder.decode(realmBytes);
+            integrityKey=new Uint8Array(await crypto.subtle.digest("MD5",textEncoder.encode(`${username}:${realm}:${password}`)));
             authAttributes=[
-                createTurnStunAttribute(TURN_STUN_ATTR.USERNAME,proxyTextEncoder.encode(username)),
-                createTurnStunAttribute(TURN_STUN_ATTR.REALM,proxyTextEncoder.encode(realm)),
+                createTurnStunAttribute(TURN_STUN_ATTR.USERNAME,textEncoder.encode(username)),
+                createTurnStunAttribute(TURN_STUN_ATTR.REALM,textEncoder.encode(realm)),
                 createTurnStunAttribute(TURN_STUN_ATTR.NONCE,nonce),
             ];
 
@@ -1136,7 +1917,11 @@ async function connectViaProxy(proxyConfig,targetHost,targetPort,initialData){
     }else if(type==="turn"){
         socket=await turnConnect(proxyConfig,targetHost,targetPort);
     }else if(type==="http"||type==="https"){
-        socket=await httpConnect(proxyConfig,targetHost,targetPort,type==="https");
+        // HTTPS 代理若填的是 IP（绝大多数公共 HTTPS 代理都是），走自研 TLS 客户端，
+        // 避免 CF 内置 secureTransport 的证书校验导致握手失败；域名仍走内置 TLS。
+        socket=type==="https"&&isIpAddress(proxyConfig.host)
+            ?await httpsProxyConnect(targetHost,targetPort,null,proxyConfig)
+            :await httpConnect(proxyConfig,targetHost,targetPort,type==="https");
     }else{
         const raw=connect({hostname:stripIPv6Brackets(proxyConfig.host),port:proxyConfig.port});
         try{
@@ -1231,7 +2016,6 @@ export default {
             if (s5 && proxyIp && types.includes("direct_s5_proxy")) {
                 v.push({ label: "直连+" + proxyLabel + "+ProxyIP", raw: buildPath("p", 1, s5, proxyIp) });
             }
-            // 至少要有一个变体
             if (v.length === 0) {
                 v.push({ label: "直连", raw: buildPath("d", 1, null, null) });
             }
@@ -3339,7 +4123,6 @@ export default {
 			        });
 			    }
 			    
-			    // 更新选中样式
 			    function updateNodeTypeSelectedStyle() {
 			        document.querySelectorAll('.node-type-item').forEach(item => {
 			            const checkbox = item.querySelector('.node-type-checkbox');
@@ -3364,19 +4147,16 @@ export default {
                             document.getElementById('fallbackTimeout').value = cfg.fallbackTimeout || 100;
                             document.getElementById('bestIpApi').value = cfg.bestIpApi || 'https://ipdb.api.030101.xyz/?type=bestcf';
                             document.getElementById('subLinkBase').value = cfg.subLinkBase || '${DEFAULT_SUBLINK_BASE}';
-                            // ECH 配置加载
                             document.getElementById('echEnabled').checked = !!cfg.ech;
                             const echCfg = cfg.echConfig && typeof cfg.echConfig === 'object' ? cfg.echConfig : {};
                             document.getElementById('echSni').value = echCfg.sni || '';
                             document.getElementById('echDns').value = echCfg.dns || '';
 			            document.getElementById('autoUpdateBestIp').checked = !!cfg.autoUpdateBestIp;
 			            
-			            // 加载节点类型配置
 			            const savedNodeTypes = Array.isArray(cfg.nodeTypes) && cfg.nodeTypes.length > 0
 			                ? cfg.nodeTypes
 			                : ["direct"];
 			            updateNodeTypeAvailability();
-			            // 应用保存的勾选状态
 			            document.querySelectorAll('.node-type-checkbox').forEach(cb => {
 			                const item = cb.closest('.node-type-item');
 			                if (!item.classList.contains('disabled')) {
@@ -3390,7 +4170,6 @@ export default {
 			                }
 			            });
 			            
-			            // 加载协议类型配置
 			            const savedProtocols = Array.isArray(cfg.protocols) && cfg.protocols.length > 0
 			                ? cfg.protocols
 			                : ["vless", "trojan"];
@@ -3453,13 +4232,11 @@ export default {
                             return;
                         }
                         const autoUpdateBestIp = document.getElementById('autoUpdateBestIp').checked;
-                        // ECH 配置收集
                         const ech = document.getElementById('echEnabled').checked;
                         const echSni = document.getElementById('echSni').value.trim();
                         const echDns = document.getElementById('echDns').value.trim();
                         const echConfig = { sni: echSni, dns: echDns };
 			        
-			        // 收集选中的节点类型
 			        const nodeTypes = [];
 			        document.querySelectorAll('.node-type-checkbox').forEach(cb => {
 			            if (cb.checked && !cb.closest('.node-type-item').classList.contains('disabled')) {
@@ -3467,13 +4244,11 @@ export default {
 			            }
 			        });
 			        
-			        // 校验：至少选择一个类型
 			        if (nodeTypes.length === 0) {
 			            showMessage('❌ 请至少选择一个节点类型', 'error');
 			            return;
 			        }
 			        
-			        // 收集协议类型
 			        const protocols = [];
 			        document.querySelectorAll('.protocol-checkbox').forEach(cb => {
 			            if (cb.checked) {
@@ -3481,7 +4256,6 @@ export default {
 			            }
 			        });
 			        
-			        // 校验：至少选择一个协议
 			        if (protocols.length === 0) {
 			            showMessage('❌ 请至少选择一个协议类型', 'error');
 			            return;
@@ -3642,7 +4416,6 @@ export default {
 			            updateNodeTypeSelectedStyle();
 			        });
 			        
-			        // 节点类型/协议类型勾选框点击事件
 			        document.querySelectorAll('.node-type-item').forEach(item => {
 			            item.addEventListener('click', (e) => {
 			                const checkbox = item.querySelector('input[type="checkbox"]');
@@ -3676,7 +4449,6 @@ export default {
             if (cookieSetHeader) panelHeaders["set-cookie"] = cookieSetHeader;
             return new Response(html, { headers: panelHeaders });
         }
-        // 其他路径都返回 404
         return new Response("Not Found", { status: 404 });
     },
     async scheduled(event, env, ctx) {
