@@ -85,7 +85,7 @@ const DEFAULT_BEST_IP_API = "https://ipdb.api.030101.xyz/?type=bestcf";
 const DEFAULT_ECH_SNI = "cloudflare-ech.com";
 const DEFAULT_ECH_DNS = "https://sm2.doh.pub/dns-query";
 // 订阅转换服务（Sublink Worker）。可用环境变量 SUBLINK_BASE 覆盖，换成你自己部署的 Sublink。
-const DEFAULT_SUBLINK_BASE = "https://sublink.vpnjacky.dpdns.org";
+const DEFAULT_SUBLINK_BASE = "https://sublink.vpnjk.cc.cd";
 // Sublink 原生 API 是 /clash /singbox /surge /xray?config=...，
 // 并没有 subconverter 那种 /sub?target=... 接口，所以这里只做「目标 -> 端点」白名单映射。
 const SUBLINK_TARGET_ENDPOINTS = { clash: "clash", singbox: "singbox", surge: "surge" };
