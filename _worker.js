@@ -4148,6 +4148,7 @@ export default {
 			            if (!response.ok) throw 0;
 			            
 			            const cfg = await response.json();
+			            originalUuid = cfg.uuid || '';
 			            document.getElementById('uuid').value = cfg.uuid || '';
                             document.getElementById('s5').value = cfg.s5 || '';
                             document.getElementById('proxyIp').value = cfg.proxyIp || '';
@@ -4222,6 +4223,8 @@ export default {
 			        }
 			    }
 			
+			    let originalUuid = '';
+
 			    async function saveConfigForm() {
 			        const uuid = document.getElementById('uuid').value.trim();
 			        // UUID 格式在前端先挡一道，省得跑到服务端才报错。
@@ -4304,13 +4307,18 @@ export default {
 			        const result = await response.json();
 			        
 			        if (response.ok) {
-			            showMessage('✅ ' + (result.message || '配置保存成功') + '，请使用新 UUID 重新登录', 'success');
-			            // 保存成功后旧 Cookie 里的 session 就失效了（UUID 变了），
-			            // 主动清掉再跳回登录页，避免用户看到空的登录框反复试。
-			            document.cookie = 'session=; Path=/; Max-Age=0; SameSite=Lax';
-			            setTimeout(() => {
-			                window.location.href = '/';
-			            }, 800);
+			            if (uuid === originalUuid) {
+			                // UUID 没变，session 依然有效，不用重新登录
+			                showMessage('✅ 配置保存成功', 'success');
+			            } else {
+			                showMessage('✅ 配置保存成功，请使用新 UUID 重新登录', 'success');
+			                // 保存成功后旧 Cookie 里的 session 就失效了（UUID 变了），
+			                // 主动清掉再跳回登录页，避免用户看到空的登录框反复试。
+			                document.cookie = 'session=; Path=/; Max-Age=0; SameSite=Lax';
+			                setTimeout(() => {
+			                    window.location.href = '/';
+			                }, 800);
+			            }
 			        } else {
 			            showMessage('❌ ' + (result.error || '配置保存失败'), 'error');
 			        }
