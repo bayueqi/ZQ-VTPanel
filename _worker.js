@@ -2504,10 +2504,17 @@ export default {
             } else if (req.method === "POST") {
                 try {
                     const incoming = await req.json();
-                    if (!incoming.uuid || typeof incoming.uuid !== "string")
-                        return json({ error: "UUID不能为空" }, 400);
-                    if (incoming.uuid !== userConfig.uuid)
+                    // 身份校验用 session（Cookie / ?pwd=），不用 body.uuid：
+                    // body.uuid 是「要改成的新 UUID」，不是当前密码，
+                    // 否则永远只能填旧 UUID 才能通过，等于改不了。
+                    const sessionUUID = getSessionUUID(req, url);
+                    if (!sessionUUID) return json({ error: "请先登录" }, 401);
+                    if (sessionUUID !== userConfig.uuid)
                         return json({ error: "UUID错误，无权访问" }, 403);
+                    const newUUID = typeof incoming.uuid === "string" ? incoming.uuid.trim() : "";
+                    if (!newUUID) return json({ error: "UUID不能为空" }, 400);
+                    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(newUUID))
+                        return json({ error: "UUID格式不正确，需为标准 UUID（8-4-4-4-12 十六进制）" }, 400);
                     if (typeof incoming.subLinkBase === "string" &&
                         incoming.subLinkBase.trim() &&
                         !normalizeSubLinkBase(incoming.subLinkBase))
@@ -2558,7 +2565,7 @@ export default {
                     if (!domains.length) domains.push({ ip: "", remark: "" });
                     if (!ports.length) ports.push(443);
                     const normalized = {
-                        uuid: incoming.uuid,
+                        uuid: newUUID,
                         domain: domains[0]?.ip || "",
                         port: String(ports[0] || 443),
                         s5: incoming.s5 || "",
@@ -3726,7 +3733,7 @@ export default {
 					<form id="configForm">
 						<div class="form-group">
 							<label for="uuid">UUID</label>
-							<input type="text" id="uuid" name="uuid" required placeholder="请输入UUID">
+							<input type="text" id="uuid" name="uuid" required placeholder="标准格式 8-4-4-4-12 位十六进制，例 ef9d104e-ca0e-4202-ba4b-a0afb969c747，修改后需用新 UUID 重新登录">
 						</div>
 						<div class="form-group">
 							<div class="label-with-link">
@@ -4217,6 +4224,16 @@ export default {
 			
 			    async function saveConfigForm() {
 			        const uuid = document.getElementById('uuid').value.trim();
+			        // UUID 格式在前端先挡一道，省得跑到服务端才报错。
+			        // 注意：面板 HTML 是模板字符串，这里刻意不用正则，避免反斜杠被模板转义吃掉。
+			        if (!uuid) {
+			            showMessage('❌ UUID 不能为空', 'error');
+			            return;
+			        }
+			        if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(uuid)) {
+			            showMessage('❌ UUID 格式不正确，需为标准 UUID（8-4-4-4-12 位十六进制）', 'error');
+			            return;
+			        }
                         const s5 = document.getElementById('s5').value.trim();
                         const proxyIp = document.getElementById('proxyIp').value.trim();
                         const fallbackTimeout = parseInt(document.getElementById('fallbackTimeout').value, 10) || 100;
@@ -4287,7 +4304,10 @@ export default {
 			        const result = await response.json();
 			        
 			        if (response.ok) {
-			            showMessage('✅ ' + (result.message || '配置保存成功'), 'success');
+			            showMessage('✅ ' + (result.message || '配置保存成功') + '，请使用新 UUID 重新登录', 'success');
+			            // 保存成功后旧 Cookie 里的 session 就失效了（UUID 变了），
+			            // 主动清掉再跳回登录页，避免用户看到空的登录框反复试。
+			            document.cookie = 'session=; Path=/; Max-Age=0; SameSite=Lax';
 			            setTimeout(() => {
 			                window.location.href = '/';
 			            }, 800);
