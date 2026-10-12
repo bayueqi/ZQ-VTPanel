@@ -15,19 +15,41 @@
 - ECH 加密、回退检测时间、优选IP API 手动 / 定时更新
 - UUID 登录鉴权，路径与参数伪装混淆
 
-## 部署
+## 🚀 部署步骤
 
-### Workers（推荐）
+### 1. 部署到 Workers
 
-1. Cloudflare 控制台 → Workers 和 Pages → 创建 Worker
-2. 在线编辑器删除默认代码，粘贴 `_worker.js` 全部内容，保存并部署
-3. 创建 KV 命名空间（建议命名 `VTPanel`），在 Worker → 设置 → 变量 → KV 命名空间绑定，变量名 `VTPanel`
-4. 绑定自定义域名（Workers 默认域名不能用于节点连接）
+1. 登录 Cloudflare 控制台
+2. 左侧进入 **Workers 和 Pages**
+3. 点击 **创建应用程序** → 选择 **创建 Worker**
+4. 输入 Worker 名称并创建
+5. 进入在线编辑器：
+   - 删除默认模板代码
+   - 打开本仓库的 `_worker.js`，复制全部内容
+   - 粘贴到 Cloudflare 在线编辑器中
+6. 点击右上角 **保存并部署**
+7. 创建 KV 命名空间：
+   - 左侧进入 **存储和数据库**，点击 **KV**
+   - 点击 **创建命名空间**，名称建议：`VTPanel`
+8. 在 Worker 详情页绑定 KV：
+   - 打开 Worker → **设置** → **变量** → **KV 命名空间绑定** → **添加绑定**
+   - 变量名称：`VTPanel`
+   - 选择刚创建的 KV 命名空间
+   - 点击 **保存**
+9. 绑定自定义域名（注意：不能使用 workers 默认域名）
 
-### Pages
+### 2. 部署到 Pages
 
-1. 下载仓库 ZIP → Workers 和 Pages → 创建 Pages → 直接上传
-2. 同样绑定 KV（变量名 `VTPanel`）后重新部署
+1. [下载 ZIP](https://github.com/bayueqi/ZQ-VTPanel/archive/refs/heads/main.zip)
+2. 登录 Cloudflare → **Workers 和 Pages** → **创建应用程序** → 选择 **创建 Pages**
+3. 选择 **直接上传**，上传下载的 ZIP 包，直接保存并部署
+4. 创建 KV 命名空间：
+   - 左侧进入 **存储和数据库**，点击 **KV**
+   - 点击 **创建命名空间**，名称建议：`VTPanel`
+5. 绑定 KV：进入 Pages 项目 → **设置** → **变量** → **KV 命名空间绑定** → **添加绑定**
+   - 变量名称：`VTPanel`
+   - 选择已创建的 KV 命名空间
+6. 再次上传 ZIP 包并部署，接着访问域名（可以绑定自定义域名，也可使用 pages 默认域名）
 
 ## 使用
 
