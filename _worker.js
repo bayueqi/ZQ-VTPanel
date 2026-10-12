@@ -2080,33 +2080,8 @@ export default {
             const mode = modeMap[modeVal] || "parallel";
             const s5Param = getParamValue(["s", "socks", "proxy"]);
             const proxyParam = getParamValue(["p", "ip", "proxyip"]);
-            let proxyConfig = s5Param ? parseProxyAddress(s5Param) : null;
-            if (!proxyConfig && s5Param) {
-                const path = s5Param;
-                if (path.includes("@")) {
-                    const [cred, server] = path.split("@"),
-                        [user, pass] = cred.split(":"),
-                        [host, port] = server.split(":");
-                    if (host && port)
-                        proxyConfig = {
-                            type: "socks5",
-                            host,
-                            port: +port,
-                            username: user,
-                            password: pass,
-                        };
-                } else if (path.includes(":")) {
-                    const [host, port] = path.split(":");
-                    if (host && port)
-                        proxyConfig = {
-                            type: "socks5",
-                            host,
-                            port: +port,
-                            username: "",
-                            password: "",
-                        };
-                }
-            }
+            // parseProxyAddress 已覆盖 带协议前缀 / user:pass@host:port / host:port 全部格式，无需兜底
+            const proxyConfig = s5Param ? parseProxyAddress(s5Param) : null;
             const PROXY_IP = proxyParam ? String(proxyParam) : null;
 
             const getOrder = () => {
@@ -2898,7 +2873,7 @@ export default {
 	<title>ZQ-VTPanel</title>
 	<link rel="icon" type="image/png" href="http://img.520jk.cc.cd/i/2026/10/10/726865.webp">
 	<style>
-	:root{--primary:#2563eb;--primary-light:#3b82f6;--primary-dark:#1d4ed8;--bg1:#c7d8ff;--bg2:#e3d5ff;--bg3:#ffd9ec;--glass:rgba(255,255,255,.55);--glass-strong:rgba(255,255,255,.72);--line:rgba(255,255,255,.75);--text:#1e3a5f;--muted:#64748b;--border:rgba(147,197,253,.55);--shadow:0 8px 24px rgba(37,99,235,.10);--shadow-lg:0 18px 50px rgba(37,99,235,.16)}
+	:root{--primary:#2563eb;--primary-light:#3b82f6;--primary-dark:#1d4ed8;--bg1:#c7d8ff;--bg2:#e3d5ff;--bg3:#ffd9ec;--glass:rgba(255,255,255,.55);--glass-strong:rgba(255,255,255,.72);--line:rgba(96,130,210,.4);--text:#1e3a5f;--muted:#64748b;--border:rgba(96,130,210,.45);--shadow:0 8px 24px rgba(37,99,235,.10);--shadow-lg:0 18px 50px rgba(37,99,235,.16)}
 *{box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;margin:0;min-height:100vh;background:linear-gradient(135deg,var(--bg1),var(--bg2),var(--bg3));background-size:300% 300%;animation:bgShift 16s ease infinite;color:var(--text);line-height:1.6;overflow-x:hidden}
 @keyframes bgShift{0%{background-position:0 50%}50%{background-position:100% 50%}100%{background-position:0 50%}}
@@ -2949,7 +2924,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .collapse-header:hover{background:rgba(255,255,255,.35)}
 .collapse-header .icon{transition:transform .3s}
 .collapse-header.active .icon{transform:rotate(180deg)}
-.collapse-content{max-height:0;overflow:hidden;transition:max-height .35s ease,padding .35s ease;padding:0 20px}
+.collapse-content{max-height:0;overflow:hidden;transition:max-height .3s ease,padding .3s ease;padding:0 20px}
 .collapse-content.active{max-height:3000px;padding:20px}
 .ch-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .ch-dot{width:9px;height:9px;border-radius:3px;flex:none}
@@ -2958,8 +2933,8 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .sub-head{width:100%;padding:14px 16px;font-size:13.5px;font-weight:700;color:var(--text);background:rgba(255,255,255,.35);border:none;border-radius:0;display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;text-align:left;transition:.25s}
 .sub-head:hover{background:rgba(255,255,255,.55)}
 .sub-head .icon{font-size:13px;color:var(--muted)}
-.sub-title{display:inline-flex;align-items:center;gap:8px}
-.sub-right{display:inline-flex;align-items:center;gap:10px}
+	.sub-title{display:inline-flex;align-items:center;gap:8px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+	.sub-right{display:inline-flex;align-items:center;gap:10px;flex:none}
 .sub-block .collapse-content{padding:0 16px}
 .sub-block .collapse-content.active{max-height:none;padding:16px}
 .sub-block .form-group{margin-bottom:16px}
@@ -3009,6 +2984,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 	.input-group,.list-item{gap:6px}
 	.input-group input,.list-item input{min-width:0}
 	.input-group .btn,.list-item .btn{padding:10px 12px;font-size:12px;margin-bottom:0}
+	.gt-tip{display:none}
 	.link-arrow{width:28px;height:28px;margin-left:4px}
 	.sub-block .collapse-content.active{padding:14px 12px}
 	.qr-content{padding:24px 18px}
@@ -3203,15 +3179,24 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 				document.getElementById('closeQrBtn').addEventListener('click', function () { document.getElementById('qrModal').classList.remove('active'); });
 				document.getElementById('qrModal').addEventListener('click', function (e) { if (e.target === document.getElementById('qrModal')) document.getElementById('qrModal').classList.remove('active'); });
 
-				// 折叠（通用，含内层）
+				// 折叠（通用，含内层）：max-height 用精确内容高度，动画才丝滑；内层展开后同步外层高度
+				function syncHeights() {
+					var list = document.querySelectorAll('.collapse-content.active');
+					for (var i = list.length - 1; i >= 0; i--) list[i].style.maxHeight = list[i].scrollHeight + 'px';
+				}
 				document.querySelectorAll('.collapse-header').forEach(function (h) {
 					h.addEventListener('click', function () {
 						var c = document.getElementById(h.getAttribute('data-collapse'));
 						if (!c) return;
-						var on = h.classList.toggle('active');
+						var on = !c.classList.contains('active');
+						h.classList.toggle('active', on);
 						c.classList.toggle('active', on);
+						c.style.maxHeight = on ? c.scrollHeight + 'px' : '0px';
+						syncHeights();
 					});
 				});
+				syncHeights();
+				window.addEventListener('resize', syncHeights);
 				// 全局代理开关不触发折叠
 				document.getElementById('globalProxyWrap').addEventListener('click', function (e) { e.stopPropagation(); });
 
