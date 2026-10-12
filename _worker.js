@@ -3016,7 +3016,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 			</div>
 			<form id="configForm">
 			<div class="collapse-section">
-				<button type="button" class="collapse-header" data-collapse="basic-content"><span class="ch-title"><span class="ch-dot" style="background:#64748b"></span>基础配置</span><span class="icon">▼</span></button>
+				<button type="button" class="collapse-header" data-collapse="basic-content"><span class="ch-title"><span class="ch-dot" style="background:#10b981"></span>基础配置</span><span class="icon">▼</span></button>
 				<div class="collapse-content" id="basic-content">
 					<div class="form-group">
 						<label for="uuid">UUID</label>
@@ -3098,7 +3098,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						</div>
 					</div>
 					<div class="sub-block">
-						<div class="collapse-header sub-head active" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#7c3aed"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理<span class="gt-tip">开：只走其它代理；关：优先直连，失败后回退其它代理</span></label><span class="icon">▼</span></span></div>
+						<div class="collapse-header sub-head active" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理<span class="gt-tip">开：只走其它代理；关：优先直连，失败后回退其它代理</span></label><span class="icon">▼</span></span></div>
 						<div class="collapse-content active" id="node-exit">
 							<div class="form-group">
 								<div class="sub-note"><span class="note-label">入口地址</span> 可填优选IP或域名，留空用本项目域名；入口地址 × 代理，各出一组节点</div>
