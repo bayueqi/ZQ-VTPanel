@@ -72,7 +72,7 @@ function parseTrojanRequest(buffer,pwd){
 
 const text=(c,s=200)=>new Response(c,{status:s,headers:{"content-type":"text/plain; charset=utf-8"}});
 const json=(c,s=200)=>new Response(JSON.stringify(c),{status:s,headers:{"content-type":"application/json; charset=utf-8"}});
-const b64e=(s)=>{const e=new TextEncoder(),b=e.encode(s);return btoa(String.fromCharCode(...new Uint8Array(b)));};
+const b64e=(s)=>{const b=new TextEncoder().encode(s);let bin="";for(let i=0;i<b.length;i+=0x8000)bin+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(bin);};
 const randStr=()=>Math.random().toString(36).slice(2,8);
 const paths=["/static/js","/assets/img","/api/2024","/cdn/file","/upload/data","/media/v2","/lib/ext","/res/now","/stat/click","/track/log","/api/v1/data","/css/main","/js/app","/fonts/google","/images/hero","/videos/intro","/api/v2/user","/assets/css","/static/media","/build/js","/dist/css","/public/img","/content/data","/files/doc","/download/pkg","/api/v3/item","/resource/img"];
 const paramsMap={t:["m","type","mode"],d:["dir","direct","d"],s:["socks","proxy","s"],p:["ip","proxyip","p"],v:["r","rand","v","id","t"]};
@@ -98,13 +98,30 @@ function normalizeSubLinkBase(v) {
     return /^https?:\/\/[^\s/]+/i.test(s) ? s : "";
 }
 const DEFAULT_CONFIG = {
-    uuid: DEFAULT_UUID, domain: "", port: "443", s5: "", proxyIp: "",
-    domains: [], ports: [443], fallbackTimeout: 100,
+    uuid: DEFAULT_UUID,
+    domains: [],               // 优选IP：[{ip, remark}]
+    proxyIps: [],              // ProxyIP：[host 或 host:port]
+    entries: [],               // 入口地址：[优选IP 或域名]，空 = 本项目域名
+    proxies: [],               // 其它代理：[{proxy, remark}]
+    globalProxy: false,        // true 只走其它代理；false 优先直连，失败回退其它代理
+    fallbackTimeout: 100,
     subLinkBase: DEFAULT_SUBLINK_BASE,
     bestIpApi: DEFAULT_BEST_IP_API, autoUpdateBestIp: false,
-    nodeTypes: ["direct"], protocols: ["vless", "trojan"],
+    protocols: ["vless", "trojan"],
     ech: false, echConfig: { sni: DEFAULT_ECH_SNI, dns: DEFAULT_ECH_DNS },
 };
+
+// 把 domains 归一化成 [{ip, remark}]，去重去空（字符串数组旧格式兼容）
+function normalizeDomains(arr) {
+    const seen = new Set(), out = [];
+    if (Array.isArray(arr)) for (const x of arr) {
+        const item = typeof x === "string"
+            ? { ip: x.trim(), remark: "" }
+            : (x && { ip: String(x.ip || "").trim(), remark: String(x.remark || "").trim() });
+        if (item && item.ip && !seen.has(item.ip)) { seen.add(item.ip); out.push(item); }
+    }
+    return out;
+}
 
 // 根据 userConfig 生成 ECH 链接参数；未启用时返回空串
 function buildEchParam(userConfig) {
@@ -293,34 +310,38 @@ async function getUserConfig(env) {
     try {
         const cfg = await env.VTPanel?.get("user_config", "json");
         const m = cfg || {};
-        // 兼容旧格式：字符串数组 → 对象数组
-        if (Array.isArray(m.domains)) {
-            m.domains = m.domains.map((x) =>
-                typeof x === "string" ? { ip: x, remark: "" } : x,
-            ).filter((x) => x && x.ip);
+        m.domains = normalizeDomains(m.domains);
+        // 旧单值迁移：s5 → proxies；proxyIp → proxyIps
+        if (!Array.isArray(m.proxies)) {
+            m.proxies = (typeof m.s5 === "string" && m.s5.trim()) ? [{ proxy: m.s5.trim(), remark: "" }] : [];
         } else {
-            m.domains = [];
+            m.proxies = m.proxies
+                .map((x) => typeof x === "string" ? { proxy: x.trim(), remark: "" } : (x && { proxy: String(x.proxy || "").trim(), remark: String(x.remark || "").trim() }))
+                .filter((x) => x && x.proxy);
         }
-        m.ports = Array.isArray(m.ports) ? m.ports : [];
+        if (!Array.isArray(m.proxyIps)) {
+            m.proxyIps = (typeof m.proxyIp === "string" && m.proxyIp.trim()) ? [m.proxyIp.trim()] : [];
+        } else {
+            m.proxyIps = m.proxyIps.map((x) => String(x || "").trim()).filter(Boolean);
+        }
+        m.entries = (Array.isArray(m.entries) ? m.entries : []).map((x) => String(x || "").trim()).filter(Boolean);
+        m.globalProxy = !!m.globalProxy;
         m.fallbackTimeout =
             typeof m.fallbackTimeout === "number"
                 ? Math.max(1, Math.min(5000, m.fallbackTimeout)) : 100;
         m.bestIpApi = m.bestIpApi || DEFAULT_BEST_IP_API;
         m.subLinkBase = normalizeSubLinkBase(m.subLinkBase) || fallback.subLinkBase;
         m.autoUpdateBestIp = !!m.autoUpdateBestIp;
-        if (!Array.isArray(m.nodeTypes) || !m.nodeTypes.length) m.nodeTypes = ["direct"];
         if (!Array.isArray(m.protocols) || !m.protocols.length) m.protocols = ["vless", "trojan"];
-        // ECH 字段归一化（兼容旧配置）
         m.ech = !!m.ech;
         if (!m.echConfig || typeof m.echConfig !== "object" || Array.isArray(m.echConfig)) m.echConfig = {};
         let echSni = typeof m.echConfig.sni === "string" ? m.echConfig.sni.trim() : "";
         let echDns = typeof m.echConfig.dns === "string" ? m.echConfig.dns.trim() : "";
         m.echConfig.sni = echSni || DEFAULT_ECH_SNI;
         m.echConfig.dns = echDns || DEFAULT_ECH_DNS;
+        // 旧 domain 单值并入 domains
         const d = (m.domain || "").trim();
         if (d && !m.domains.some((x) => x.ip === d)) m.domains.unshift({ ip: d, remark: "" });
-        const pn = Math.max(1, Math.min(65535, parseInt(m.port || "443", 10) || 443));
-        if (!m.ports.some((x) => +x === pn)) m.ports.push(pn);
         return { ...fallback, ...m };
     } catch {
         return fallback;
@@ -1997,49 +2018,38 @@ export default {
         const buildTrojanUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "") =>
             `trojan://${uuid}@${preferredDomain}:${port}?security=tls&sni=${workerHost}&type=ws${echParam}&host=${workerHost}&path=${encodeURIComponent(rawPathQuery)}#${encodeURIComponent(label || preferredDomain)}`;
 
-        const buildVariants = (s5, proxyIp, nodeTypes) => {
-            const v = [];
-            const types = Array.isArray(nodeTypes) && nodeTypes.length > 0 ? nodeTypes : ["direct"];
-            const proxyLabel = s5 ? proxyTypeLabel(s5) : "";
-            if (types.includes("direct")) {
-                v.push({ label: "直连", raw: buildPath("d", 1, null, null) });
-            }
-            if (s5 && types.includes("s5")) {
-                v.push({ label: proxyLabel, raw: buildPath("s", null, s5, null) });
-            }
-            if (s5 && types.includes("direct_s5")) {
-                v.push({ label: "直连+" + proxyLabel, raw: buildPath("p", 1, s5, null) });
-            }
-            if (proxyIp && types.includes("direct_proxy")) {
-                v.push({ label: "直连+ProxyIP", raw: buildPath("p", 1, null, proxyIp) });
-            }
-            if (s5 && proxyIp && types.includes("direct_s5_proxy")) {
-                v.push({ label: "直连+" + proxyLabel + "+ProxyIP", raw: buildPath("p", 1, s5, proxyIp) });
-            }
-            if (v.length === 0) {
-                v.push({ label: "直连", raw: buildPath("d", 1, null, null) });
-            }
-            return v;
+        // 取 workerHost / 优选IP(domains) / 入口地址(entries)；入口地址为空时用本项目域名
+        const getDomains = (request, cfg) => {
+            const workerHost = new URL(request.url).hostname;
+            const domains = normalizeDomains(cfg.domains);
+            if (!domains.length) domains.push({ ip: workerHost, remark: "" });
+            const entries = (cfg.entries || []).length ? cfg.entries : [workerHost];
+            return { workerHost, domains, entries };
         };
 
-        const getDomainPortLists = (request, cfg) => {
-            const workerHost = new URL(request.url).hostname;
-            const domains = [
-                ...new Map(
-                    (cfg.domains || []).filter((x) => x && x.ip).map((x) => [x.ip, x]),
-                ).values(),
-            ];
-            if (!domains.length)
-                domains.push({ ip: (cfg.domain || workerHost).trim() || workerHost, remark: "" });
-            const ports = [
-                ...new Set(
-                    (cfg.ports || [])
-                        .concat(cfg.port || [])
-                        .map((p) => Math.max(1, Math.min(65535, +p || 443))),
-                ),
-            ];
-            if (!ports.length) ports.push(443);
-            return { workerHost, domains, ports };
+        // 生成全部节点（label/raw/addr 三元组）。raw 里的 d/s/p 参数决定隧道回退顺序。
+        const buildNodes = (cfg, lists) => {
+            const nodes = [];
+            const proxies = cfg.proxies || [];
+            const proxyIps = cfg.proxyIps || [];
+            for (const d of lists.domains) {
+                if (proxyIps.length) {
+                    // 填了 ProxyIP：只出「优选IP × ProxyIP」回退节点，不再单独出优选IP直连节点
+                    for (const p of proxyIps)
+                        nodes.push({ label: d.remark || d.ip, raw: buildPath("p", 1, null, p), addr: d.ip });
+                } else {
+                    nodes.push({ label: d.remark || d.ip, raw: buildPath("d", 1, null, null), addr: d.ip });
+                }
+            }
+            for (const e of lists.entries) {
+                for (const pr of proxies) {
+                    const name = pr.remark || proxyTypeLabel(pr.proxy);
+                    nodes.push(cfg.globalProxy
+                        ? { label: name, raw: buildPath("s", null, pr.proxy, null), addr: e }
+                        : { label: name, raw: buildPath("p", 1, pr.proxy, null), addr: e });
+                }
+            }
+            return nodes;
         };
 
         if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
@@ -2279,19 +2289,6 @@ export default {
                                             await processTrojanUDP(rawClientData);
                                         return;
                                     }
-                                    const trojanConnectStreams = async (remoteSock, webSocket) => {
-                                        remoteSock.readable
-                                            .pipeTo(
-                                                new WritableStream({
-                                                    async write(chunk) {
-                                                        if (webSocket.readyState === 1)
-                                                            webSocket.send(chunk);
-                                                    },
-                                                    abort() {},
-                                                }),
-                                            )
-                                            .catch(() => {});
-                                    };
                                     const tryConnect = async (type) => {
                                         try {
                                             if (type === "direct")
@@ -2328,7 +2325,7 @@ export default {
                                         const sock = await tryConnect("s5");
                                         if (sock) {
                                             remote = sock;
-                                            await trojanConnectStreams(sock, ws);
+                                            await connectStreams(sock, ws, null, null, userConfig);
                                         }
                                         return;
                                     }
@@ -2337,12 +2334,31 @@ export default {
                                         const backup = await tryNext(1);
                                         if (backup) {
                                             remote = backup;
-                                            await trojanConnectStreams(backup, ws);
+                                            await connectStreams(backup, ws, null, null, userConfig);
                                         }
                                         return;
                                     }
                                     remote = primary;
-                                    await trojanConnectStreams(primary, ws);
+                                    const retryFunc =
+                                        order.length > 1
+                                            ? async () => {
+                                                  const backup = await tryNext(1);
+                                                  if (backup) {
+                                                      try {
+                                                          primary.close();
+                                                      } catch {}
+                                                      remote = backup;
+                                                      await connectStreams(
+                                                          backup,
+                                                          ws,
+                                                          null,
+                                                          null,
+                                                          userConfig,
+                                                      );
+                                                  }
+                                              }
+                                            : null;
+                                    await connectStreams(primary, ws, null, retryFunc, userConfig);
                                     return;
                                 }
                             }
@@ -2519,66 +2535,33 @@ export default {
                         incoming.subLinkBase.trim() &&
                         !normalizeSubLinkBase(incoming.subLinkBase))
                         return json({ error: "订阅转换服务地址格式不正确，需是 http(s):// 开头的服务地址（不要带 ? 参数）" }, 400);
-                    let domains = Array.isArray(incoming.domains)
-                        ? incoming.domains
-                              .map((x) => {
-                                  if (typeof x === "object" && x !== null) {
-                                      return {
-                                          ip: (x.ip || "").trim(),
-                                          remark: (x.remark || "").trim(),
-                                      };
-                                  } else if (typeof x === "string") {
-                                      return { ip: x.trim(), remark: "" };
-                                  }
-                                  return null;
-                              })
-                              .filter((x) => x && x.ip)
-                        : [];
+                    let domains = normalizeDomains(incoming.domains);
                     if (incoming.domain) {
                         const d = (incoming.domain + "").trim();
                         if (d && !domains.some((x) => x.ip === d))
                             domains.unshift({ ip: d, remark: "" });
                     }
-                    let ports = Array.isArray(incoming.ports)
-                        ? incoming.ports.map((x) =>
-                              Math.max(1, Math.min(65535, parseInt(x + "", 10) || 443)),
-                          )
-                        : [];
-                    if (incoming.port) {
-                        const pn = Math.max(
-                            1,
-                            Math.min(65535, parseInt(incoming.port + "", 10) || 443),
-                        );
-                        if (!ports.includes(pn)) ports.unshift(pn);
-                    }
+                    const proxies = (Array.isArray(incoming.proxies) ? incoming.proxies : [])
+                        .map((x) => typeof x === "string" ? { proxy: x.trim(), remark: "" } : (x && { proxy: String(x.proxy || "").trim(), remark: String(x.remark || "").trim() }))
+                        .filter((x) => x && x.proxy);
+                    if (!proxies.length && incoming.s5) proxies.push({ proxy: String(incoming.s5).trim(), remark: "" });
+                    const proxyIps = (Array.isArray(incoming.proxyIps) ? incoming.proxyIps : [])
+                        .map((x) => String(x || "").trim()).filter(Boolean);
+                    if (!proxyIps.length && incoming.proxyIp) proxyIps.push(String(incoming.proxyIp).trim());
+                    const entries = (Array.isArray(incoming.entries) ? incoming.entries : [])
+                        .map((x) => String(x || "").trim()).filter(Boolean);
                     const fallbackTimeout =
                         typeof incoming.fallbackTimeout === "number"
                             ? Math.max(1, Math.min(5000, incoming.fallbackTimeout))
                             : 100;
-                    const uniqueIps = new Set();
-                    domains = domains.filter((x) => {
-                        if (uniqueIps.has(x.ip)) return false;
-                        uniqueIps.add(x.ip);
-                        return true;
-                    });
-                    ports = [...new Set(ports)];
-                    if (!domains.length) domains.push({ ip: "", remark: "" });
-                    if (!ports.length) ports.push(443);
                     const normalized = {
                         uuid: newUUID,
-                        domain: domains[0]?.ip || "",
-                        port: String(ports[0] || 443),
-                        s5: incoming.s5 || "",
-                        proxyIp: incoming.proxyIp || "",
-                        domains: domains,
-                        ports: ports,
+                        domains, proxyIps, entries, proxies,
+                        globalProxy: !!incoming.globalProxy,
                         fallbackTimeout,
                         subLinkBase: normalizeSubLinkBase(incoming.subLinkBase) || DEFAULT_SUBLINK_BASE,
                         bestIpApi: incoming.bestIpApi || DEFAULT_BEST_IP_API,
                         autoUpdateBestIp: !!incoming.autoUpdateBestIp,
-                        nodeTypes: Array.isArray(incoming.nodeTypes) && incoming.nodeTypes.length > 0
-                            ? incoming.nodeTypes
-                            : ["direct"],
                         protocols: Array.isArray(incoming.protocols) && incoming.protocols.length > 0
                             ? incoming.protocols
                             : ["vless", "trojan"],
@@ -2602,8 +2585,8 @@ export default {
             if (!inputUUID) return new Response("missing uuid", { status: 400 });
             const userConfig = await getUserConfig(env);
             if (inputUUID !== userConfig.uuid) return new Response("Not Found", { status: 404 });
-            const { workerHost, domains, ports } = getDomainPortLists(req, userConfig);
-            const variants = buildVariants(userConfig.s5, userConfig.proxyIp, userConfig.nodeTypes);
+            const lists = getDomains(req, userConfig);
+            const nodes = buildNodes(userConfig, lists);
             const ua = (req.headers.get("User-Agent") || "").toLowerCase();
             const isSubConverterRequest =
                 url.searchParams.has("b64") ||
@@ -2640,38 +2623,16 @@ export default {
             // 收集所有节点使用的域名（排除纯 IP），用于 ECH nameserver-policy 走 DoH 解析
             const isIP = (s) => /^(\d{1,3}\.){3}\d{1,3}$/.test(s) || /^[0-9a-fA-F:]+$/.test(s);
             const echHosts = [...new Set(
-                [workerHost, ...domains.map((d) => d.ip)]
+                [lists.workerHost, ...lists.domains.map((d) => d.ip), ...lists.entries]
                     .filter((h) => h && !isIP(h)),
             )];
             const echSni = userConfig.echConfig?.sni || "";
             const echDns = userConfig.echConfig?.dns || "";
-            for (const d of domains) {
-                for (const p of ports) {
-                    for (const v of variants) {
-                        if (protocols.includes("vless")) {
-                            const vlessName = d.remark ? `V ${v.label} ${d.remark}` : `V ${v.label} ${d.ip}:${p}`;
-                            out.push(
-                                buildVlessUri(v.raw, userConfig.uuid, vlessName, workerHost, d.ip, p, echParam),
-                            );
-                        }
-                        if (protocols.includes("trojan")) {
-                            const trojanName = d.remark
-                                ? `T ${v.label} ${d.remark}`
-                                : `T ${v.label}  ${d.ip}:${p}`;
-                            out.push(
-                                buildTrojanUri(
-                                    v.raw,
-                                    userConfig.uuid,
-                                    trojanName,
-                                    workerHost,
-                                    d.ip,
-                                    p,
-                                    echParam,
-                                ),
-                            );
-                        }
-                    }
-                }
+            for (const n of nodes) {
+                if (protocols.includes("vless"))
+                    out.push(buildVlessUri(n.raw, userConfig.uuid, "V " + n.label, lists.workerHost, n.addr, 443, echParam));
+                if (protocols.includes("trojan"))
+                    out.push(buildTrojanUri(n.raw, userConfig.uuid, "T " + n.label, lists.workerHost, n.addr, 443, echParam));
             }
             const nodesContent = out.join("\n");
             const responseHeaders = {
@@ -2914,40 +2875,18 @@ export default {
             const userUUID = userConfig.uuid;
             const origin = new URL(req.url).origin;
             const subUrl = `${origin}/sub?pwd=${userUUID}`;
-            const lists = getDomainPortLists(req, userConfig);
-            const variants = buildVariants(userConfig.s5, userConfig.proxyIp, userConfig.nodeTypes);
+            const lists = getDomains(req, userConfig);
+            const nodes = buildNodes(userConfig, lists);
             const allNodeUris = [];
             const protocols = Array.isArray(userConfig.protocols) && userConfig.protocols.length > 0
                 ? userConfig.protocols
                 : ["vless", "trojan"];
             const echParam = buildEchParam(userConfig);
-            for (const d of lists.domains) {
-                for (const p of lists.ports) {
-                    for (const v of variants) {
-                        if (protocols.includes("vless")) {
-                            const vlessName = d.remark ? `V ${v.label} ${d.remark}` : `V ${v.label} ${d.ip}:${p}`;
-                            allNodeUris.push(
-                                buildVlessUri(v.raw, userUUID, vlessName, lists.workerHost, d.ip, p, echParam),
-                            );
-                        }
-                        if (protocols.includes("trojan")) {
-                            const trojanName = d.remark
-                                ? `T ${v.label} ${d.remark}`
-                                : `T ${v.label}  ${d.ip}:${p}`;
-                            allNodeUris.push(
-                                buildTrojanUri(
-                                    v.raw,
-                                    userUUID,
-                                    trojanName,
-                                    lists.workerHost,
-                                    d.ip,
-                                    p,
-                                    echParam,
-                                ),
-                            );
-                        }
-                    }
-                }
+            for (const n of nodes) {
+                if (protocols.includes("vless"))
+                    allNodeUris.push(buildVlessUri(n.raw, userUUID, "V " + n.label, lists.workerHost, n.addr, 443, echParam));
+                if (protocols.includes("trojan"))
+                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, "T " + n.label, lists.workerHost, n.addr, 443, echParam));
             }
             const allNodesJson = JSON.stringify(allNodeUris);
             const html = `
@@ -2959,942 +2898,263 @@ export default {
 	<title>ZQ-VTPanel</title>
 	<link rel="icon" type="image/png" href="http://img.520jk.cc.cd/i/2026/10/10/726865.webp">
 	<style>
-		:root {
-		  --primary: #2563eb;
-		  --primary-light: #3b82f6;
-		  --primary-dark: #1d4ed8;
-		  --bg-gradient-start: #eff6ff;
-		  --bg-gradient-end: #dbeafe;
-		  --card-bg: rgba(255, 255, 255, 0.95);
-		  --text-primary: #1e3a5f;
-		  --text-secondary: #64748b;
-		  --border-color: #bfdbfe;
-		  --shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.1), 0 2px 4px -1px rgba(37, 99, 235, 0.06);
-		  --shadow-lg: 0 20px 25px -5px rgba(37, 99, 235, 0.15), 0 10px 10px -5px rgba(37, 99, 235, 0.1);
-		}
-		
-		* {
-		  box-sizing: border-box;
-		}
-		
-		body {
-		  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-		  margin: 0;
-		  min-height: 100vh;
-		  background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
-		  color: var(--text-primary);
-		  line-height: 1.6;
-		}
-		
-		.wrap {
-		  max-width: 1000px;
-		  margin: 0 auto;
-		  padding: 32px 24px;
-		  position: relative;
-		}
-		
-		.header {
-		  text-align: center;
-		  margin-bottom: 32px;
-		  padding: 24px 0;
-		  border-bottom: 2px solid var(--border-color);
-		}
-		
-		h1 {
-		  margin: 0;
-		  font-size: 32px;
-		  font-weight: 700;
-		  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
-		  -webkit-background-clip: text;
-		  -webkit-text-fill-color: transparent;
-		  background-clip: text;
-		}
-		
-		.subtitle {
-		  color: var(--text-secondary);
-		  margin-top: 8px;
-		  font-size: 14px;
-		}
-		
-		.topbar {
-		  position: absolute;
-		  right: 24px;
-		  top: 32px;
-		  display: flex;
-		  gap: 12px;
-		}
-		
-		.topbar a {
-		  width: 42px;
-		  height: 42px;
-		  border-radius: 12px;
-		  background: var(--card-bg);
-		  border: 1px solid var(--border-color);
-		  color: var(--primary);
-		  display: inline-flex;
-		  align-items: center;
-		  justify-content: center;
-		  transition: all .3s ease;
-		  box-shadow: var(--shadow);
-		}
-		
-		.topbar a:hover {
-		  background: var(--primary);
-		  color: #fff;
-		  transform: translateY(-2px);
-		  box-shadow: var(--shadow-lg);
-		}
-		
-		.main-card {
-		  background: var(--card-bg);
-		  border-radius: 20px;
-		  padding: 28px;
-		  margin-bottom: 24px;
-		  box-shadow: var(--shadow-lg);
-		  border: 1px solid var(--border-color);
-		  backdrop-filter: blur(10px);
-		}
-		
-		.section-title {
-		  font-size: 18px;
-		  font-weight: 600;
-		  color: var(--primary);
-		  margin-bottom: 16px;
-		  display: flex;
-		  align-items: center;
-		  gap: 8px;
-		}
-		
-		.section-title::before {
-		  content: '';
-		  width: 4px;
-		  height: 20px;
-		  background: linear-gradient(180deg, var(--primary) 0%, var(--primary-light) 100%);
-		  border-radius: 2px;
-		}
-		
-		.url-box {
-		  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-		  border: 2px solid var(--border-color);
-		  border-radius: 12px;
-		  padding: 16px;
-		  font-family: 'Monaco', 'Consolas', monospace;
-		  font-size: 13px;
-		  color: var(--text-primary);
-		  word-break: break-all;
-		  position: relative;
-		  overflow: hidden;
-		}
-		
-		.url-box::before {
-		  content: '';
-		  position: absolute;
-		  top: 0;
-		  left: 0;
-		  right: 0;
-		  height: 3px;
-		  background: linear-gradient(90deg, var(--primary) 0%, var(--primary-light) 100%);
-		}
-		
-		.button-group {
-		  display: flex;
-		  gap: 12px;
-		  margin-top: 20px;
-		  flex-wrap: wrap;
-		}
-		
-		.btn {
-		  flex: 1;
-		  min-width: 120px;
-		  padding: 12px 20px;
-		  border-radius: 10px;
-		  border: none;
-		  font-size: 14px;
-		  font-weight: 600;
-		  cursor: pointer;
-		  transition: all .3s ease;
-		  display: inline-flex;
-		  align-items: center;
-		  justify-content: center;
-		  gap: 6px;
-		}
-		
-		.btn-primary {
-		  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
-		  color: #fff;
-		  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.3);
-		}
-		
-		.btn-primary:hover {
-		  transform: translateY(-2px);
-		  box-shadow: 0 6px 20px rgba(37, 99, 235, 0.4);
-		}
-		
-		.btn-secondary {
-		  background: #fff;
-		  color: var(--primary);
-		  border: 2px solid var(--border-color);
-		}
-		
-		.btn-secondary:hover {
-		  transform: translateY(-2px);
-		  box-shadow: var(--shadow-lg);
-		}
-		
-		.btn-success {
-		  background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
-		  color: #fff;
-		  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3);
-		}
-		
-		.btn-success:hover {
-		  transform: translateY(-2px);
-		  box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
-		}
-		
-		.btn-danger {
-		  background: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
-		  color: #fff;
-		}
-		
-		.btn-danger:hover {
-		  transform: translateY(-2px);
-		  box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
-		}
-		
-		.form-group {
-		  margin-bottom: 20px;
-		}
-		
-		label {
-		  display: block;
-		  margin-bottom: 8px;
-		  font-weight: 600;
-		  color: var(--text-primary);
-		}
-		
-		input[type="text"],
-		input[type="number"] {
-		  width: 100%;
-		  padding: 12px 16px;
-		  border: 2px solid var(--border-color);
-		  border-radius: 10px;
-		  background: #fff;
-		  color: var(--text-primary);
-		  font-size: 14px;
-		  box-sizing: border-box;
-		  transition: all .3s ease;
-		}
-		
-		input[type="text"]:focus,
-		input[type="number"]:focus {
-		  outline: none;
-		  border-color: var(--primary);
-		  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-		}
-		
-		.input-group {
-		  display: flex;
-		  gap: 8px;
-		}
-		
-		.input-group input {
-		  flex: 1;
-		}
-		
-		.input-group .btn {
-		  flex: none;
-		  min-width: auto;
-		  padding: 10px 16px;
-		  font-size: 13px;
-		}
-		
-		.list {
-		  display: flex;
-		  flex-direction: column;
-		  gap: 8px;
-		  margin-bottom: 12px;
-		}
-		
-		.list-item {
-		  display: flex;
-		  gap: 8px;
-		  align-items: center;
-		}
-		
-		.list-item input {
-		  flex: 1;
-		}
-		
-		.list-item .btn {
-		  flex: none;
-		  min-width: auto;
-		  padding: 8px 12px;
-		  font-size: 12px;
-		}
-		
-		.chip {
-		  padding: 6px 14px;
-		  font-size: 12px;
-		  min-width: auto;
-		}
-		
-		.node-types-container {
-		  display: flex;
-		  flex-direction: column;
-		  gap: 10px;
-		  margin-top: 8px;
-		}
-		
-		.node-type-item {
-		  display: flex;
-		  align-items: center;
-		  gap: 12px;
-		  padding: 12px 16px;
-		  border: 2px solid var(--border-color);
-		  border-radius: 10px;
-		  background: #fff;
-		  cursor: pointer;
-		  transition: all .3s ease;
-		  user-select: none;
-		}
-		
-		.node-type-item:hover {
-		  border-color: var(--primary-light);
-		  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1);
-		}
-		
-		.node-type-item.selected {
-		  border-color: var(--primary);
-		  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
-		  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.2);
-		}
-		
-		.node-type-item.disabled {
-		  opacity: 0.4;
-		  cursor: not-allowed;
-		}
-		
-		.node-type-item input[type="checkbox"] {
-		  width: 18px;
-		  height: 18px;
-		  accent-color: var(--primary);
-		  cursor: pointer;
-		  flex-shrink: 0;
-		}
-		
-		.node-type-item.disabled input[type="checkbox"] {
-		  cursor: not-allowed;
-		}
-		
-		.node-type-label {
-		  font-weight: 600;
-		  font-size: 14px;
-		  color: var(--text-primary);
-		  flex: 1;
-		}
-		
-		.node-type-desc {
-		  font-size: 12px;
-		  color: var(--text-secondary);
-		  margin-top: 2px;
-		}
-		
-		.node-type-badge {
-		  font-size: 11px;
-		  padding: 2px 8px;
-		  border-radius: 6px;
-		  background: #fee2e2;
-		  color: #991b1b;
-		  font-weight: 600;
-		}
-		
-		.node-type-item.selected .node-type-badge {
-		  background: #fef3c7;
-		  color: #92400e;
-		}
-		
-		.link-arrow {
-		  color: var(--primary);
-		  text-decoration: none;
-		  font-size: 14px;
-		  display: inline-flex;
-		  align-items: center;
-		  justify-content: center;
-		  width: 28px;
-		  height: 28px;
-		  border-radius: 8px;
-		  background: var(--bg-gradient-end);
-		  transition: all .3s ease;
-		  margin-left: 8px;
-		}
-		
-		.link-arrow:hover {
-		  background: var(--primary);
-		  color: #fff;
-		}
-		
-		.label-with-link {
-		  display: flex;
-		  align-items: center;
-		}
-		
-		.config-section {
-		  display: none;
-		}
-		
-		.config-section.active {
-		  display: block;
-		}
-		
-		.collapse-section {
-		  margin-bottom: 16px;
-		  border: 2px solid var(--border-color);
-		  border-radius: 12px;
-		  overflow: hidden;
-		}
-		
-		.collapse-header {
-		  width: 100%;
-		  padding: 16px 20px;
-		  background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
-		  border: none;
-		  cursor: pointer;
-		  display: flex;
-		  align-items: center;
-		  justify-content: space-between;
-		  font-size: 16px;
-		  font-weight: 600;
-		  color: var(--text-primary);
-		  transition: all .3s ease;
-		}
-		
-		.collapse-header:hover {
-		  background: linear-gradient(135deg, var(--bg-gradient-end) 0%, var(--bg-gradient-start) 100%);
-		}
-		
-		.collapse-header .icon {
-		  font-size: 20px;
-		  transition: transform .3s ease;
-		}
-		
-		.collapse-header.active .icon {
-		  transform: rotate(180deg);
-		}
-		
-		.collapse-content {
-		  max-height: 0;
-		  overflow: hidden;
-		  transition: max-height .3s ease, padding .3s ease;
-		  padding: 0 20px;
-		}
-		
-		.collapse-content.active {
-		  max-height: 2000px;
-		  padding: 20px;
-		}
-		
-		.collapse-content.scroll-area {
-		  overflow-y: auto;
-		}
-		
-		.collapse-content.scroll-area.active {
-		  max-height: 65vh;
-		}
-		
-		.qr-modal {
-		  display: none;
-		  position: fixed;
-		  top: 0;
-		  left: 0;
-		  width: 100%;
-		  height: 100%;
-		  background: rgba(30, 58, 95, 0.6);
-		  backdrop-filter: blur(4px);
-		  z-index: 1000;
-		  align-items: center;
-		  justify-content: center;
-		  padding: 20px;
-		}
-		
-		.qr-modal.active {
-		  display: flex;
-		}
-		
-		.qr-content {
-		  background: var(--card-bg);
-		  border-radius: 24px;
-		  padding: 32px;
-		  text-align: center;
-		  max-width: 400px;
-		  width: 100%;
-		  box-shadow: var(--shadow-lg);
-		  border: 1px solid var(--border-color);
-		  position: relative;
-		}
-		
-		.qr-content::before {
-		  content: '';
-		  position: absolute;
-		  top: 0;
-		  left: 0;
-		  right: 0;
-		  height: 6px;
-		  background: linear-gradient(90deg, var(--primary) 0%, var(--primary-light) 100%);
-		  border-radius: 24px 24px 0 0;
-		}
-		
-		.qr-title {
-		  font-size: 20px;
-		  font-weight: 600;
-		  color: var(--text-primary);
-		  margin-bottom: 8px;
-		}
-		
-		.qr-subtitle {
-		  color: var(--text-secondary);
-		  font-size: 14px;
-		  margin-bottom: 20px;
-		}
-		
-		#qrCanvas {
-		  display: flex;
-		  justify-content: center;
-		  margin: 20px 0;
-		  padding: 20px;
-		  background: #fff;
-		  border-radius: 16px;
-		  border: 2px solid var(--border-color);
-		}
-		
-		.qr-close {
-		  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
-		  color: #fff;
-		  border: none;
-		  padding: 12px 32px;
-		  border-radius: 10px;
-		  font-weight: 600;
-		  cursor: pointer;
-		  transition: all .3s ease;
-		}
-		
-		.qr-close:hover {
-		  transform: translateY(-2px);
-		  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.3);
-		}
-		
-		.toast {
-		  position: fixed;
-		  bottom: 24px;
-		  left: 50%;
-		  transform: translateX(-50%) translateY(100px);
-		  background: var(--text-primary);
-		  color: #fff;
-		  padding: 12px 24px;
-		  border-radius: 10px;
-		  font-size: 14px;
-		  opacity: 0;
-		  transition: all .3s ease;
-		  z-index: 2000;
-		}
-		
-		.toast.show {
-		  transform: translateX(-50%) translateY(0);
-		  opacity: 1;
-		}
-		
-		.message {
-		  margin-top: 12px;
-		  padding: 12px 16px;
-		  border-radius: 10px;
-		  text-align: center;
-		  font-size: 14px;
-		  font-weight: 500;
-		}
-		
-		.message.success {
-		  background: #d1fae5;
-		  border: 1px solid #a7f3d0;
-		  color: #065f46;
-		}
-		
-		.message.error {
-		  background: #fee2e2;
-		  border: 1px solid #fecaca;
-		  color: #991b1b;
-		}
-		
-		.spinner {
-		  display: inline-block;
-		  width: 12px;
-		  height: 12px;
-		  border: 2px solid rgba(255, 255, 255, .35);
-		  border-top-color: #fff;
-		  border-radius: 50%;
-		  animation: spin .8s linear infinite;
-		  margin-right: 6px;
-		  vertical-align: -2px;
-		}
-		
-		@keyframes spin {
-		  to {
-		    transform: rotate(360deg);
-		  }
-		}
-		
-		@media(max-width: 640px) {
-		  .wrap {
-		    padding: 14px 12px 28px;
-		  }
-		
-		  .header {
-		    margin-bottom: 18px;
-		    padding: 12px 0;
-		  }
-		
-		  h1 {
-		    font-size: 22px;
-		  }
-		
-		  .subtitle {
-		    font-size: 13px;
-		  }
-		
-		  .topbar {
-		    position: static;
-		    justify-content: center;
-		    margin-bottom: 16px;
-		  }
-		
-		  .btn {
-		    min-width: 100%;
-		    margin-bottom: 6px;
-		    padding: 11px 16px;
-		    font-size: 14px;
-		  }
-		
-		  .button-group {
-		    gap: 8px;
-		  }
-		
-		  .tab-nav {
-		    overflow-x: auto;
-		    flex-wrap: nowrap;
-		    -webkit-overflow-scrolling: touch;
-		    scrollbar-width: none;
-		  }
-		
-		  .tab-nav::-webkit-scrollbar {
-		    display: none;
-		  }
-		
-		  .tab-btn {
-		    white-space: nowrap;
-		    flex: none;
-		  }
-		
-		  /* 折叠区：收紧内边距，缩短滚动距离 */
-		  .collapse-section {
-		    margin-bottom: 12px;
-		  }
-		
-		  .collapse-header {
-		    padding: 12px 14px;
-		    font-size: 15px;
-		  }
-		
-		  .collapse-content.active {
-		    padding: 14px;
-		  }
-		
-		  /* 手机端取消配置区的内部滚动，交给整页滚动，避免嵌套滚动 */
-		  .collapse-content.scroll-area.active {
-		    max-height: none;
-		  }
-		
-		  .form-group {
-		    margin-bottom: 14px;
-		  }
-		
-		  label {
-		    margin-bottom: 6px;
-		    font-size: 14px;
-		  }
-		
-		  input[type="text"],
-		  input[type="number"],
-		  input[type="password"] {
-		    padding: 10px 12px;
-		    border-radius: 8px;
-		    font-size: 13px;
-		  }
-		
-		  /* 输入行：允许输入框收缩，按钮不再把输入框挤出容器 */
-		  .input-group,
-		  .list-item {
-		    gap: 6px;
-		  }
-		
-		  .input-group input,
-		  .list-item input {
-		    min-width: 0;
-		  }
-		
-		  .input-group .btn,
-		  .list-item .btn,
-		  .chip {
-		    padding: 9px 10px;
-		    font-size: 12px;
-		    margin-bottom: 0;
-		  }
-		
-		  .label-with-link {
-		    flex-wrap: wrap;
-		    gap: 6px;
-		  }
-		
-		  .label-with-link .btn {
-		    min-width: auto;
-		    flex: none;
-		    margin-bottom: 0;
-		    padding: 6px 12px;
-		    font-size: 13px;
-		  }
-		
-		  .link-arrow {
-		    width: 26px;
-		    height: 26px;
-		    margin-left: 4px;
-		  }
-		
-		  /* 节点类型：更紧凑 */
-		  .node-type-item {
-		    padding: 10px 12px;
-		    gap: 10px;
-		  }
-		
-		  .node-type-label {
-		    font-size: 13.5px;
-		    overflow-wrap: anywhere;
-		  }
-		
-		  .node-type-desc {
-		    font-size: 11.5px;
-		    overflow-wrap: anywhere;
-		  }
-		
-		  .node-type-badge {
-		    font-size: 10px;
-		    padding: 2px 6px;
-		  }
-		
-		  .url-box {
-		    overflow-wrap: anywhere;
-		  }
-		}
+	:root{--primary:#2563eb;--primary-light:#3b82f6;--primary-dark:#1d4ed8;--bg1:#c7d8ff;--bg2:#e3d5ff;--bg3:#ffd9ec;--glass:rgba(255,255,255,.55);--glass-strong:rgba(255,255,255,.72);--line:rgba(255,255,255,.75);--text:#1e3a5f;--muted:#64748b;--border:rgba(147,197,253,.55);--shadow:0 8px 24px rgba(37,99,235,.10);--shadow-lg:0 18px 50px rgba(37,99,235,.16)}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;margin:0;min-height:100vh;background:linear-gradient(135deg,var(--bg1),var(--bg2),var(--bg3));background-size:300% 300%;animation:bgShift 16s ease infinite;color:var(--text);line-height:1.6;overflow-x:hidden}
+@keyframes bgShift{0%{background-position:0 50%}50%{background-position:100% 50%}100%{background-position:0 50%}}
+body::before,body::after{content:'';position:fixed;border-radius:50%;filter:blur(100px);opacity:.7;z-index:-1;animation:float 18s ease-in-out infinite;pointer-events:none}
+body::before{width:460px;height:460px;background:radial-gradient(circle,rgba(59,130,246,.7),transparent 70%);top:-140px;left:-120px}
+body::after{width:500px;height:500px;background:radial-gradient(circle,rgba(168,85,247,.6),transparent 70%);bottom:-160px;right:-120px;animation-delay:-9s}
+@keyframes float{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(36px,28px) scale(1.08)}}
+.wrap{max-width:1000px;margin:0 auto;padding:32px 24px;position:relative}
+.header{text-align:center;margin-bottom:32px;padding:24px 0}
+h1{margin:0;font-size:34px;font-weight:800;letter-spacing:.5px;background:linear-gradient(135deg,var(--primary),var(--primary-light),#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.subtitle{color:var(--muted);margin-top:8px;font-size:14px}
+.topbar{position:absolute;right:24px;top:32px;display:flex;gap:12px}
+.topbar a{width:44px;height:44px;border-radius:14px;background:var(--glass);border:1px solid var(--line);color:var(--primary);display:inline-flex;align-items:center;justify-content:center;transition:.3s;box-shadow:var(--shadow);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.topbar a:hover{background:var(--primary);color:#fff;transform:translateY(-3px) scale(1.05);box-shadow:var(--shadow-lg)}
+.main-card{background:var(--glass);border-radius:24px;padding:28px;margin-bottom:24px;box-shadow:var(--shadow-lg);border:1px solid var(--line);backdrop-filter:blur(22px) saturate(160%);-webkit-backdrop-filter:blur(22px) saturate(160%);animation:rise .5s ease both}
+@keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+.url-box{background:rgba(255,255,255,.5);border:1px solid var(--line);border-radius:14px;padding:16px;font-family:Monaco,Consolas,monospace;font-size:13px;color:var(--text);word-break:break-all;position:relative;overflow:hidden;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.url-box::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--primary),var(--primary-light),#7c3aed);background-size:200% 100%;animation:shine 4s linear infinite}
+@keyframes shine{to{background-position:200% 0}}
+.button-group{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}
+.btn{flex:1;min-width:120px;padding:12px 20px;border-radius:12px;border:none;font-size:14px;font-weight:600;cursor:pointer;transition:all .25s;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:linear-gradient(135deg,var(--primary),var(--primary-light));color:#fff;box-shadow:0 6px 18px rgba(37,99,235,.35)}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(37,99,235,.45)}
+.btn-secondary{background:var(--glass-strong);color:var(--primary);border:1px solid var(--line);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.btn-secondary:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
+.btn-success{background:linear-gradient(135deg,#10b981,#34d399);color:#fff;box-shadow:0 6px 18px rgba(16,185,129,.3)}
+.btn-success:hover{transform:translateY(-2px)}
+.btn-danger{background:linear-gradient(135deg,#ef4444,#f87171);color:#fff}
+.btn-danger:hover{transform:translateY(-2px)}
+.form-group{margin-bottom:20px}
+label{display:block;margin-bottom:8px;font-weight:600;color:var(--text)}
+input[type=text],input[type=number]{width:100%;padding:12px 16px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.55);color:var(--text);font-size:14px;box-sizing:border-box;transition:.25s;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255,.8);box-shadow:0 0 0 4px rgba(37,99,235,.12)}
+.input-group{display:flex;gap:8px}
+.input-group input{flex:1}
+.input-group .btn,.list-item .btn{flex:none;min-width:auto;padding:10px 16px;font-size:13px}
+.list{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.list-item{display:flex;gap:8px;align-items:center}
+.list-item input{flex:1}
+.list-item .btn{padding:8px 12px;font-size:12px}
+.link-arrow{color:var(--primary);text-decoration:none;font-size:14px;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:8px;background:var(--glass-strong);transition:.3s;margin-left:8px;flex:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.link-arrow:hover{background:var(--primary);color:#fff;transform:translateY(-2px)}
+.label-with-link{display:flex;align-items:center}
+.collapse-section{margin-bottom:16px;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:rgba(255,255,255,.35);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);transition:.3s}
+.collapse-section:hover{border-color:rgba(147,197,253,.8)}
+.collapse-header{width:100%;padding:16px 20px;background:transparent;border:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:16px;font-weight:700;color:var(--text);transition:.3s;text-align:left}
+.collapse-header:hover{background:rgba(255,255,255,.35)}
+.collapse-header .icon{transition:transform .3s}
+.collapse-header.active .icon{transform:rotate(180deg)}
+.collapse-content{max-height:0;overflow:hidden;transition:max-height .35s ease,padding .35s ease;padding:0 20px}
+.collapse-content.active{max-height:3000px;padding:20px}
+.ch-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ch-dot{width:9px;height:9px;border-radius:3px;flex:none}
+.sub-block{border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.4);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);overflow:hidden}
+.sub-block + .sub-block{margin-top:12px}
+.sub-head{width:100%;padding:14px 16px;font-size:13.5px;font-weight:700;color:var(--text);background:rgba(255,255,255,.35);border:none;border-radius:0;display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;text-align:left;transition:.25s}
+.sub-head:hover{background:rgba(255,255,255,.55)}
+.sub-head .icon{font-size:13px;color:var(--muted)}
+.sub-title{display:inline-flex;align-items:center;gap:8px}
+.sub-right{display:inline-flex;align-items:center;gap:10px}
+.sub-block .collapse-content{padding:0 16px}
+.sub-block .collapse-content.active{max-height:none;padding:16px}
+.sub-block .form-group{margin-bottom:16px}
+.sub-block .form-group:last-child{margin-bottom:0}
+.sub-note{font-size:12px;font-weight:400;color:var(--muted);margin:0 0 8px;line-height:1.5}
+.sub-note .note-label{font-weight:600;color:var(--text)}
+.sub-hint{font-size:12px;font-weight:400;color:var(--muted)}
+.gt-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none;flex:none}
+.gt-tip{font-weight:400;color:var(--muted)}
+.gt-switch input{display:none}
+.gt-slider{width:34px;height:18px;border-radius:999px;background:#cbd5e1;position:relative;transition:.25s}
+.gt-slider::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:.25s}
+.gt-switch input:checked + .gt-slider{background:var(--primary)}
+.gt-switch input:checked + .gt-slider::after{left:18px}
+.proto-pills{display:flex;gap:10px;flex-wrap:wrap}
+.proto-pill{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.5);cursor:pointer;user-select:none;font-weight:600;font-size:14px;color:var(--text);transition:.25s;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.proto-pill input{display:none}
+.proto-pill.on{border-color:var(--primary);background:linear-gradient(135deg,rgba(37,99,235,.15),rgba(124,58,237,.12));box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.qr-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(30,58,95,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:1000;align-items:center;justify-content:center;padding:20px}
+.qr-modal.active{display:flex}
+.qr-content{background:var(--glass-strong);border-radius:24px;padding:32px;text-align:center;max-width:400px;width:100%;box-shadow:var(--shadow-lg);border:1px solid var(--line);position:relative;backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);animation:rise .35s ease}
+.qr-content::before{content:'';position:absolute;top:0;left:0;right:0;height:6px;background:linear-gradient(90deg,var(--primary),var(--primary-light),#7c3aed);border-radius:24px 24px 0 0}
+.qr-title{font-size:20px;font-weight:700;color:var(--text);margin-bottom:8px}
+.qr-subtitle{color:var(--muted);font-size:14px;margin-bottom:20px}
+#qrCanvas{display:flex;justify-content:center;margin:20px 0;padding:20px;background:#fff;border-radius:16px;border:1px solid var(--border)}
+.qr-close{background:linear-gradient(135deg,var(--primary),var(--primary-light));color:#fff;border:none;padding:12px 32px;border-radius:12px;font-weight:600;cursor:pointer;transition:.25s}
+.qr-close:hover{transform:translateY(-2px)}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(100px);background:rgba(30,58,95,.85);color:#fff;padding:12px 24px;border-radius:12px;font-size:14px;opacity:0;transition:.35s;z-index:2000;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+.message{margin-top:12px;padding:12px 16px;border-radius:12px;text-align:center;font-size:14px;font-weight:500}
+.message.success{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.35);color:#065f46}
+.message.error{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);color:#991b1b}
+@media(max-width:640px){
+	body::before{width:280px;height:280px;top:-90px;left:-90px}
+	body::after{width:300px;height:300px;bottom:-100px;right:-90px}
+	.wrap{padding:16px 12px 32px}
+	.header{margin-bottom:18px;padding:14px 0}
+	h1{font-size:24px}
+	.subtitle{font-size:13px}
+	.topbar{position:static;justify-content:center;margin-bottom:16px}
+	.main-card{padding:18px 14px;border-radius:20px}
+	.btn{min-width:100%;margin-bottom:6px;padding:12px 16px;font-size:14px}
+	.collapse-section{margin-bottom:12px;border-radius:14px}
+	.collapse-header{padding:13px 14px;font-size:15px}
+	.collapse-content.active{padding:14px 12px}
+	.form-group{margin-bottom:14px}
+	.input-group,.list-item{gap:6px}
+	.input-group input,.list-item input{min-width:0}
+	.input-group .btn,.list-item .btn{padding:10px 12px;font-size:12px;margin-bottom:0}
+	.link-arrow{width:28px;height:28px;margin-left:4px}
+	.sub-block .collapse-content.active{padding:14px 12px}
+	.qr-content{padding:24px 18px}
+}
 	</style>
 </head>
 <body>
 	<div class="wrap">
 		<div class="header">
-			<h1>✨ZQ-VTPanel</h1>
+			<h1>ZQ-VTPanel</h1>
 			<div class="subtitle">安全、快速、稳定的代理服务</div>
 		</div>
 		<div class="topbar">
-			<a class="gh" href="https://github.com/BAYUEQI/ZQ-VTPanel" target="_blank" rel="nofollow noopener" aria-label="GitHub 项目">
-				<svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true" fill="currentColor">
-					<path
-						d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z">
-					</path>
-				</svg>
+			<a href="https://github.com/BAYUEQI/ZQ-VTPanel" target="_blank" rel="nofollow noopener" aria-label="GitHub 项目">
+				<svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
 			</a>
 		</div>
 		<div class="main-card">
 			<div class="collapse-section">
-				<button class="collapse-header active" data-collapse="sub-content">
-					<span>📡订阅链接</span>
-					<span class="icon">▼</span>
-				</button>
+				<button type="button" class="collapse-header active" data-collapse="sub-content"><span class="ch-title"><span class="ch-dot" style="background:#2563eb"></span>订阅链接</span><span class="icon">▼</span></button>
 				<div class="collapse-content active" id="sub-content">
 					<div class="url-box">${subUrl}</div>
 					<div class="button-group">
-						<button class="btn btn-primary copy" data-text="${subUrl}">📋复制订阅链接</button>
-						<button class="btn btn-secondary copy" id="exportNodes">📤导出节点信息</button>
-						<button class="btn btn-success" id="showQrBtn">📱显示二维码</button>
+						<button type="button" class="btn btn-primary copy" data-text="${subUrl}">复制订阅链接</button>
+						<button type="button" class="btn btn-secondary" id="exportNodes">导出节点信息</button>
+						<button type="button" class="btn btn-success" id="showQrBtn">显示二维码</button>
+					</div>
+				</div>
+			</div>
+			<form id="configForm">
+			<div class="collapse-section">
+				<button type="button" class="collapse-header" data-collapse="basic-content"><span class="ch-title"><span class="ch-dot" style="background:#64748b"></span>基础配置</span><span class="icon">▼</span></button>
+				<div class="collapse-content" id="basic-content">
+					<div class="form-group">
+						<label for="uuid">UUID</label>
+						<input type="text" id="uuid" name="uuid" required placeholder="标准格式 8-4-4-4-12 位十六进制，例 ef9d104e-ca0e-4202-ba4b-a0afb969c747">
+					</div>
+					<div class="form-group">
+						<label>协议类型</label>
+						<div class="proto-pills" id="protocolsBox">
+							<div class="proto-pill on" data-proto="vless"><input type="checkbox" value="vless" checked>VLESS</div>
+							<div class="proto-pill on" data-proto="trojan"><input type="checkbox" value="trojan" checked>Trojan</div>
+						</div>
+					</div>
+					<div class="form-group">
+						<label for="subLinkBase">订阅转换服务</label>
+						<input type="text" id="subLinkBase" name="subLinkBase" placeholder="${DEFAULT_SUBLINK_BASE}">
+					</div>
+					<div class="form-group">
+						<div class="label-with-link">
+							<label for="echEnabled" style="margin:0">Encrypted Client Hello(ECH)</label>
+							<button type="button" id="toggleEchSettings" style="margin-left:8px;padding:6px 12px;min-width:auto;flex:none;background:#DAE9FE;color:#2563eb;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer">高级</button>
+						</div>
+						<label style="display:flex;align-items:center;font-size:14px;font-weight:600;color:#64748b;margin-top:8px"><input type="checkbox" id="echEnabled" style="margin-right:8px">启用 ECH</label>
+						<div id="echSettings" style="display:none;margin-top:12px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #bfdbfe">
+							<div style="margin-bottom:8px">
+								<label style="font-size:13px;font-weight:600;color:#64748b">ECH 解析域名 (SNI)</label>
+								<input type="text" id="echSni" placeholder="${DEFAULT_ECH_SNI}" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid #bfdbfe;border-radius:6px;font-size:13px">
+							</div>
+							<div>
+								<label style="font-size:13px;font-weight:600;color:#64748b">ECH DNS 服务 (DoH)</label>
+								<input type="text" id="echDns" placeholder="${DEFAULT_ECH_DNS}" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid #bfdbfe;border-radius:6px;font-size:13px">
+							</div>
+						</div>
+					</div>
+					<div class="form-group">
+						<label for="fallbackTimeout">回退检测时间</label>
+						<input type="number" id="fallbackTimeout" name="fallbackTimeout" min="1" max="5000" placeholder="默认100毫秒">
 					</div>
 				</div>
 			</div>
 			<div class="collapse-section">
-				<button class="collapse-header" data-collapse="config-content">
-					<span>⚙️配置管理</span>
-					<span class="icon">▼</span>
-				</button>
-				<div class="collapse-content scroll-area" id="config-content">
-					<form id="configForm">
-						<div class="form-group">
-							<label for="uuid">UUID</label>
-							<input type="text" id="uuid" name="uuid" required placeholder="标准格式 8-4-4-4-12 位十六进制，例 ef9d104e-ca0e-4202-ba4b-a0afb969c747，修改后需用新 UUID 重新登录">
-						</div>
-						<div class="form-group">
-							<div class="label-with-link">
-								<label>优选IP(可选)</label>
-								<a href="https://ipdb.030101.xyz/bestcfv4/" target="_blank" rel="nofollow noopener" class="link-arrow" title="优选IP地址">↗</a>
-								<button type="button" id="toggleBestIpSettings" style="margin-left: 8px; padding: 6px 12px; min-width: auto; flex: none; background: #DAE9FE; color: #2563eb; border-radius: 10px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .3s ease; display: inline-flex; align-items: center; justify-content: center;">自动优选</button>
-							</div>
-							<div id="bestIpSettings" style="display: none; margin-bottom: 12px; padding: 12px; background: #f8fafc; border-radius: 8px; border: 1px solid #bfdbfe;">
-								<div style="margin-bottom: 8px;">
-									<label style="font-size: 13px; font-weight: 600; color: #64748b;">优选IP API地址</label>
-									<input type="text" id="bestIpApi" placeholder="${DEFAULT_BEST_IP_API}" style="width: 100%; margin-top: 4px; padding: 8px 12px; border: 2px solid #bfdbfe; border-radius: 6px; font-size: 13px;">
+				<button type="button" class="collapse-header" data-collapse="node-content"><span class="ch-title"><span class="ch-dot" style="background:#7c3aed"></span>节点配置</span><span class="icon">▼</span></button>
+				<div class="collapse-content" id="node-content">
+					<div class="sub-block">
+						<div class="collapse-header sub-head active" data-collapse="node-entry"><span class="sub-title"><span class="ch-dot" style="background:#0ea5e9"></span>优选IP 与 ProxyIP</span><span class="sub-right"><span class="icon">▼</span></span></div>
+						<div class="collapse-content active" id="node-entry">
+							<div class="form-group">
+								<div class="label-with-link">
+									<label style="margin:0">优选IP</label>
+									<a href="https://ipdb.030101.xyz/bestcfv4/" target="_blank" rel="nofollow noopener" class="link-arrow" title="优选IP地址"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M3.5 9.5L9.5 3.5M9.5 3.5H5M9.5 3.5V8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+									<button type="button" id="toggleBestIpSettings" style="margin-left:8px;padding:6px 12px;min-width:auto;flex:none;background:#DAE9FE;color:#2563eb;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer">自动优选</button>
 								</div>
-								<div style="margin-bottom: 8px;">
-									<label style="display: flex; align-items: center; font-size: 13px; font-weight: 600; color: #64748b;">
-										<input type="checkbox" id="autoUpdateBestIp" style="margin-right: 8px;">
-										自动获取优选IP
-									</label>
-								</div>
-								<div class="button-group" style="margin-bottom: 0;">
-									<button type="button" id="fetchBestIp" class="btn btn-success" style="flex: 1; min-width: auto; padding: 10px 16px; font-size: 13px;">🔄获取优选IP</button>
-								</div>
-							</div>
-							<div id="domains" class="list"></div>
-							<div class="input-group">
-								<input type="text" id="domainNew" placeholder="输入IP">
-								<input type="text" id="domainRemarkNew" placeholder="输入备注（可选）">
-								<button type="button" id="addDomain" class="btn btn-secondary chip">➕添加</button>
-							</div>
-						</div>
-						<div class="form-group">
-							<label>端口(可选)</label>
-							<div id="ports" class="list"></div>
-							<div class="input-group">
-								<input type="number" id="portNew" min="1" max="65535" placeholder="输入端口后点击添加">
-								<button type="button" id="addPort" class="btn btn-secondary chip">➕添加</button>
-							</div>
-						</div>
-						<div class="form-group">
-							<div class="label-with-link">
-								<label for="proxyIp">ProxyIP(可选)</label>
-								<a href="https://ipdb.030101.xyz/bestproxy/" target="_blank" rel="nofollow noopener" class="link-arrow" title="ProxyIP地址">↗</a>
-							</div>
-							<div class="input-group">
-								<input type="text" id="proxyIp" name="proxyIp" placeholder="格式: host:port 或 host">
-							</div>
-						</div>
-						<div class="form-group">
-							<label for="s5">其它代理(可选)</label>
-							<div class="input-group">
-								<input type="text" id="s5" name="s5" placeholder="格式: [协议://]user:pass@host:port 或 host:port，协议支持 socks5 / http / https / sstp / turn">
-							</div>
-						</div>
-						<div class="form-group">
-							<div class="label-with-link">
-								<label for="subLinkBase">订阅转换服务(可选)</label>
-							</div>
-							<div class="input-group">
-								<input type="text" id="subLinkBase" name="subLinkBase" placeholder="${DEFAULT_SUBLINK_BASE}">
-							</div>
-						</div>
-						<div class="form-group">
-							<div class="label-with-link">
-								<label for="echEnabled">Encrypted Client Hello(ECH)</label>
-								<button type="button" id="toggleEchSettings" style="margin-left: 8px; padding: 6px 12px; min-width: auto; flex: none; background: #DAE9FE; color: #2563eb; border-radius: 10px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .3s ease; display: inline-flex; align-items: center; justify-content: center;">高级</button>
-							</div>
-							<label style="display: flex; align-items: center; font-size: 14px; font-weight: 600; color: #64748b; margin-top: 8px;">
-								<input type="checkbox" id="echEnabled" name="echEnabled" style="margin-right: 8px;">
-								启用 ECH 
-							</label>
-							<div id="echSettings" style="display: none; margin-top: 12px; padding: 12px; background: #f8fafc; border-radius: 8px; border: 1px solid #bfdbfe;">
-								<div style="margin-bottom: 8px;">
-									<label style="font-size: 13px; font-weight: 600; color: #64748b;">ECH 解析域名 (SNI)</label>
-									<input type="text" id="echSni" placeholder="${DEFAULT_ECH_SNI}" style="width: 100%; margin-top: 4px; padding: 8px 12px; border: 2px solid #bfdbfe; border-radius: 6px; font-size: 13px;">
-								</div>
-								<div style="margin-bottom: 8px;">
-									<label style="font-size: 13px; font-weight: 600; color: #64748b;">ECH DNS 服务 (DoH)</label>
-									<input type="text" id="echDns" placeholder="${DEFAULT_ECH_DNS}" style="width: 100%; margin-top: 4px; padding: 8px 12px; border: 2px solid #bfdbfe; border-radius: 6px; font-size: 13px;">
-								</div>
-							</div>
-						</div>
-						<div class="form-group">
-							<label>节点类型选择 <span style="color: #dc2626; font-size: 12px;">(至少选择一个)</span></label>
-							<div class="node-types-container" id="nodeTypesContainer">
-								<div class="node-type-item" data-type="direct" data-require="">
-									<input type="checkbox" class="node-type-checkbox" value="direct" checked>
-									<div style="flex: 1;">
-										<div class="node-type-label">🟢 直连</div>
-										<div class="node-type-desc">直接连接非 Cloudflare CDN 站点</div>
+								<div id="bestIpSettings" style="display:none;margin:12px 0;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #bfdbfe">
+									<div style="margin-bottom:8px">
+										<label style="font-size:13px;font-weight:600;color:#64748b">优选IP API地址</label>
+										<input type="text" id="bestIpApi" placeholder="${DEFAULT_BEST_IP_API}" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid #bfdbfe;border-radius:6px;font-size:13px">
 									</div>
+									<label style="display:flex;align-items:center;font-size:13px;font-weight:600;color:#64748b;margin-bottom:8px"><input type="checkbox" id="autoUpdateBestIp" style="margin-right:8px">自动获取优选IP</label>
+									<button type="button" id="fetchBestIp" class="btn btn-success" style="width:100%;min-width:auto;padding:10px 16px;font-size:13px">获取优选IP</button>
 								</div>
-								<div class="node-type-item" data-type="s5" data-require="s5">
-									<input type="checkbox" class="node-type-checkbox" value="s5" disabled>
-									<div style="flex: 1;">
-										<div class="node-type-label">🔵 其它代理</div>
-										<div class="node-type-desc">仅使用其它代理连接目标，不做直连回退</div>
-									</div>
-									<span class="node-type-badge" id="badge-s5">需填写其它代理</span>
+								<div id="domains" class="list"></div>
+								<div class="input-group">
+									<input type="text" id="domainNew" placeholder="输入IP">
+									<input type="text" id="domainRemarkNew" placeholder="输入备注">
+									<button type="button" id="addDomain" class="btn btn-secondary chip">添加</button>
 								</div>
-								<div class="node-type-item" data-type="direct_s5" data-require="s5">
-									<input type="checkbox" class="node-type-checkbox" value="direct_s5" disabled>
-									<div style="flex: 1;">
-										<div class="node-type-label">🟡 直连 + 其它代理</div>
-										<div class="node-type-desc">优先直连，失败后回退到其它代理</div>
-									</div>
-									<span class="node-type-badge" id="badge-direct_s5">需填写其它代理</span>
+							</div>
+							<div class="form-group">
+								<div class="label-with-link">
+									<label style="margin:0">ProxyIP</label>
+									<a href="https://ipdb.030101.xyz/bestproxy/" target="_blank" rel="nofollow noopener" class="link-arrow" title="ProxyIP地址"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M3.5 9.5L9.5 3.5M9.5 3.5H5M9.5 3.5V8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+									<span class="sub-hint" style="margin-left:8px">与上面优选IP 自由组合</span>
 								</div>
-								<div class="node-type-item" data-type="direct_proxy" data-require="proxyIp">
-									<input type="checkbox" class="node-type-checkbox" value="direct_proxy" disabled>
-									<div style="flex: 1;">
-										<div class="node-type-label">🟣 直连 + ProxyIP</div>
-										<div class="node-type-desc">优先直连，失败后回退到ProxyIP中转</div>
-									</div>
-									<span class="node-type-badge" id="badge-direct_proxy">需填写ProxyIP</span>
-								</div>
-								<div class="node-type-item" data-type="direct_s5_proxy" data-require="s5_proxy">
-									<input type="checkbox" class="node-type-checkbox" value="direct_s5_proxy" disabled>
-									<div style="flex: 1;">
-										<div class="node-type-label">🟤 直连 + 其它代理 + ProxyIP</div>
-										<div class="node-type-desc">直连→其它代理→ProxyIP，多重回退</div>
-									</div>
-									<span class="node-type-badge" id="badge-direct_s5_proxy">需填写其它代理+ProxyIP</span>
+								<div id="proxyIps" class="list"></div>
+								<div class="input-group">
+									<input type="text" id="proxyIpNew" placeholder="格式 host:port 或 host">
+									<button type="button" id="addProxyIp" class="btn btn-secondary chip">添加</button>
 								</div>
 							</div>
 						</div>
-						<div class="form-group">
-							<label>协议类型选择 <span style="color: #dc2626; font-size: 12px;">(至少选择一个)</span></label>
-							<div class="node-types-container" id="protocolsContainer">
-								<div class="node-type-item" data-protocol="vless">
-									<input type="checkbox" class="protocol-checkbox" value="vless" checked>
-									<div style="flex: 1;">
-										<div class="node-type-label">🟦 VLESS</div>
-										<div class="node-type-desc">Xray 原生协议，性能优秀，推荐使用</div>
-									</div>
+					</div>
+					<div class="sub-block">
+						<div class="collapse-header sub-head active" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#7c3aed"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理<span class="gt-tip">开：只走其它代理；关：优先直连，失败后回退其它代理</span></label><span class="icon">▼</span></span></div>
+						<div class="collapse-content active" id="node-exit">
+							<div class="form-group">
+								<div class="sub-note"><span class="note-label">入口地址</span> 可填优选IP或域名，留空用本项目域名；入口地址 × 代理，各出一组节点</div>
+								<div id="entries" class="list"></div>
+								<div class="input-group">
+									<input type="text" id="entryNew" placeholder="输入IP或域名">
+									<button type="button" id="addEntry" class="btn btn-secondary chip">添加</button>
 								</div>
-								<div class="node-type-item" data-protocol="trojan">
-									<input type="checkbox" class="protocol-checkbox" value="trojan" checked>
-									<div style="flex: 1;">
-										<div class="node-type-label">🟧 Trojan</div>
-										<div class="node-type-desc">简洁高效，伪装性强，兼容性好</div>
-									</div>
+							</div>
+							<div class="form-group">
+								<div class="sub-note" style="margin-top:16px"><span class="note-label">其它代理</span> 支持 socks5 / http / https / sstp / turn</div>
+								<div id="proxies" class="list"></div>
+								<div class="input-group">
+									<input type="text" id="proxyNew" placeholder="格式 [协议://]user:pass@host:port">
+									<input type="text" id="proxyRemarkNew" placeholder="输入备注">
+									<button type="button" id="addProxy" class="btn btn-secondary chip">添加</button>
 								</div>
 							</div>
 						</div>
-						<div class="form-group">
-							<label for="fallbackTimeout">回退检测时间(可选)</label>
-							<div class="input-group">
-								<input type="number" id="fallbackTimeout" name="fallbackTimeout" min="1" max="5000" placeholder="默认100毫秒">
-							</div>
-						</div>
-						<div class="button-group">
-							<button type="submit" class="btn btn-primary">💾保存配置</button>
-							<button type="button" class="btn btn-secondary" id="reloadBtn">🔄重新加载</button>
-						</div>
-						<div id="message" class="message" style="display:none"></div>
-					</form>
+					</div>
 				</div>
 			</div>
+			<div class="button-group">
+				<button type="submit" class="btn btn-primary">保存配置</button>
+				<button type="button" class="btn btn-secondary" id="reloadBtn">重新加载</button>
+			</div>
+			<div id="message" class="message" style="display:none"></div>
+			</form>
 		</div>
 		<div class="qr-modal" id="qrModal">
 			<div class="qr-content">
-				<div class="qr-title">📱扫码订阅</div>
+				<div class="qr-title">扫码订阅</div>
 				<div class="qr-subtitle">使用客户端扫描二维码快速添加</div>
 				<div id="qrCanvas"></div>
 				<button class="qr-close" id="closeQrBtn">关闭</button>
@@ -3903,576 +3163,260 @@ export default {
 		<div class="toast" id="toast"></div>
 		<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 		<script>
-			(function() {
-			    // 登录成功后立刻把地址栏里的 ?pwd=... 清掉
-			    if (location.search) history.replaceState(null, '', location.pathname);
+			(function () {
+				if (location.search) history.replaceState(null, '', location.pathname);
 
-			    const toastEl = document.getElementById('toast');
-			
-			    function showToast(msg) {
-			        toastEl.textContent = msg;
-			        toastEl.classList.add('show');
-			        setTimeout(() => toastEl.classList.remove('show'), 2000);
-			    }
-			
-			    function showMessage(text, type) {
-			        const el = document.getElementById('message');
-			        el.textContent = text;
-			        el.className = 'message ' + type;
-			        el.style.display = 'block';
-			        setTimeout(() => {
-			            el.style.display = 'none';
-			        }, 3000);
-			    }
-			
-			    function fallbackCopy(text) {
-			        const ta = document.createElement('textarea');
-			        ta.value = text;
-			        ta.setAttribute('readonly', '');
-			        ta.style.position = 'absolute';
-			        ta.style.left = '-9999px';
-			        document.body.appendChild(ta);
-			        ta.select();
-			        let ok = false;
-			        try {
-			            ok = document.execCommand('copy');
-			        } catch (e) {}
-			        document.body.removeChild(ta);
-			        return ok;
-			    }
-			
-			    async function doCopy(btn) {
-			        const t = btn.getAttribute('data-text');
-			        if (!t) return;
-			        let ok = false;
-			        
-			        if (navigator.clipboard && navigator.clipboard.writeText) {
-			            try {
-			                await navigator.clipboard.writeText(t);
-			                ok = true;
-			            } catch (e) {
-			                ok = false;
-			            }
-			        }
-			        
-			        if (!ok) {
-			            ok = fallbackCopy(t);
-			        }
-			        
-			        showToast(ok ? '✅ 已复制到剪贴板' : '❌ 复制失败');
-			    }
-			
-			    document.querySelectorAll('button.copy').forEach(b => 
-			        b.addEventListener('click', e => {
-			            doCopy(e.currentTarget);
-			        })
-			    );
-			
-			    const exportBtn = document.getElementById('exportNodes');
-			    if (exportBtn) {
-			        exportBtn.addEventListener('click', async () => {
-			            const allNodes = ${allNodesJson};
-			            const nodeText = allNodes.join('\\n') + '\\n';
-			            const nodeTextBase64 = btoa(unescape(encodeURIComponent(nodeText)));
-			            let ok = false;
-			            
-			            if (navigator.clipboard && navigator.clipboard.writeText) {
-			                try {
-			                    await navigator.clipboard.writeText(nodeTextBase64);
-			                    ok = true;
-			                } catch (e) {
-			                    ok = false;
-			                }
-			            }
-			            
-			            if (!ok) {
-			                ok = fallbackCopy(nodeTextBase64);
-			            }
-			            
-			            showToast(ok ? '✅ 已导出到剪贴板' : '❌ 导出失败');
-			        });
-			    }
-			
-			    const showQrBtn = document.getElementById('showQrBtn');
-			    const qrModal = document.getElementById('qrModal');
-			    const closeQrBtn = document.getElementById('closeQrBtn');
-			    const qrCanvas = document.getElementById('qrCanvas');
-			    let qrCode = null;
-			
-			    showQrBtn.addEventListener('click', () => {
-			        qrModal.classList.add('active');
-			        if (!qrCode) {
-			            qrCode = new QRCode(qrCanvas, {
-			                text: '${subUrl}',
-			                width: 220,
-			                height: 220,
-			                colorDark: '#2563eb',
-			                colorLight: '#ffffff',
-			                correctLevel: QRCode.CorrectLevel.M
-			            });
-			        }
-			    });
-			
-			    closeQrBtn.addEventListener('click', () => {
-			        qrModal.classList.remove('active');
-			    });
-			
-			    qrModal.addEventListener('click', (e) => {
-			        if (e.target === qrModal) qrModal.classList.remove('active');
-			    });
-			
-			    const tabBtns = document.querySelectorAll('.tab-btn');
-			    const configSections = document.querySelectorAll('.config-section');
-			
-			    tabBtns.forEach(btn => {
-			        btn.addEventListener('click', () => {
-			            const tab = btn.dataset.tab;
-			            tabBtns.forEach(b => b.classList.remove('active'));
-			            configSections.forEach(s => s.classList.remove('active'));
-			            btn.classList.add('active');
-			            document.getElementById(tab + '-section').classList.add('active');
-			        });
-			    });
-			
-			    function renderList(container, values, placeholder, isPort) {
-			        container.innerHTML = '';
-			        values.forEach((val, idx) => {
-			            const row = document.createElement('div');
-			            row.className = 'list-item';
-			            
-			            if (isPort) {
-			                const input = document.createElement('input');
-			                input.type = 'number';
-			                input.min = '1';
-			                input.max = '65535';
-			                input.value = String(val);
-			                input.placeholder = placeholder;
-			                
-			                const del = document.createElement('button');
-			                del.type = 'button';
-			                del.className = 'btn btn-danger chip';
-			                del.textContent = '🗑️ 删除';
-			                del.addEventListener('click', () => {
-			                    values.splice(idx, 1);
-			                    renderList(container, values, placeholder, isPort);
-			                });
-			                
-			                row.appendChild(input);
-			                row.appendChild(del);
-			                container.appendChild(row);
-			                
-			                input.addEventListener('input', () => {
-			                    values[idx] = Number(Math.max(1, Math.min(65535, parseInt(input.value || '0', 10))));
-			                });
-			            } else {
-			                const ipInput = document.createElement('input');
-			                ipInput.type = 'text';
-			                ipInput.value = val.ip || '';
-			                ipInput.placeholder = 'IP地址';
-			                ipInput.style.flex = '1';
-			                
-			                const remarkInput = document.createElement('input');
-			                remarkInput.type = 'text';
-			                remarkInput.value = val.remark || '';
-			                remarkInput.placeholder = '备注（可选）';
-			                remarkInput.style.flex = '1';
-			                
-			                const del = document.createElement('button');
-			                del.type = 'button';
-			                del.className = 'btn btn-danger chip';
-			                del.textContent = '🗑️ 删除';
-			                del.addEventListener('click', () => {
-			                    values.splice(idx, 1);
-			                    renderList(container, values, placeholder, isPort);
-			                });
-			                
-			                row.appendChild(ipInput);
-			                row.appendChild(remarkInput);
-			                row.appendChild(del);
-			                container.appendChild(row);
-			                
-			                ipInput.addEventListener('input', () => {
-			                    values[idx].ip = ipInput.value.trim();
-			                });
-			                
-			                remarkInput.addEventListener('input', () => {
-			                    values[idx].remark = remarkInput.value.trim();
-			                });
-			            }
-			        });
-			    }
-			
-			    const state = { domains: [], ports: [] };
-			
-			    function updateNodeTypeAvailability() {
-			        const s5Val = (document.getElementById('s5')?.value || '').trim();
-			        const proxyIpVal = (document.getElementById('proxyIp')?.value || '').trim();
-			        
-			        document.querySelectorAll('.node-type-item').forEach(item => {
-			            const require = item.getAttribute('data-require') || '';
-			            const checkbox = item.querySelector('.node-type-checkbox');
-			            if (!checkbox) return; // 跳过协议类型卡片
-			            let canUse = true;
-			            
-			            if (require === 's5' && !s5Val) canUse = false;
-			            if (require === 'proxyIp' && !proxyIpVal) canUse = false;
-			            if (require === 's5_proxy' && (!s5Val || !proxyIpVal)) canUse = false;
-			            
-			            if (canUse) {
-			                item.classList.remove('disabled');
-			                checkbox.disabled = false;
-			            } else {
-			                item.classList.add('disabled');
-			                checkbox.disabled = true;
-			                checkbox.checked = false;
-			                item.classList.remove('selected');
-			            }
-			        });
-			    }
-			    
-			    function updateNodeTypeSelectedStyle() {
-			        document.querySelectorAll('.node-type-item').forEach(item => {
-			            const checkbox = item.querySelector('.node-type-checkbox');
-			            if (!checkbox) return; // 跳过协议类型卡片
-			            if (checkbox.checked) {
-			                item.classList.add('selected');
-			            } else {
-			                item.classList.remove('selected');
-			            }
-			        });
-			    }
-			
-			    async function loadConfig() {
-			        try {
-			            const response = await fetch('/api/config');
-			            if (!response.ok) throw 0;
-			            
-			            const cfg = await response.json();
-			            originalUuid = cfg.uuid || '';
-			            document.getElementById('uuid').value = cfg.uuid || '';
-                            document.getElementById('s5').value = cfg.s5 || '';
-                            document.getElementById('proxyIp').value = cfg.proxyIp || '';
-                            document.getElementById('fallbackTimeout').value = cfg.fallbackTimeout || 100;
-                            document.getElementById('bestIpApi').value = cfg.bestIpApi || 'https://ipdb.api.030101.xyz/?type=bestcf';
-                            document.getElementById('subLinkBase').value = cfg.subLinkBase || '${DEFAULT_SUBLINK_BASE}';
-                            document.getElementById('echEnabled').checked = !!cfg.ech;
-                            const echCfg = cfg.echConfig && typeof cfg.echConfig === 'object' ? cfg.echConfig : {};
-                            document.getElementById('echSni').value = echCfg.sni || '';
-                            document.getElementById('echDns').value = echCfg.dns || '';
-			            document.getElementById('autoUpdateBestIp').checked = !!cfg.autoUpdateBestIp;
-			            
-			            const savedNodeTypes = Array.isArray(cfg.nodeTypes) && cfg.nodeTypes.length > 0
-			                ? cfg.nodeTypes
-			                : ["direct"];
-			            updateNodeTypeAvailability();
-			            document.querySelectorAll('.node-type-checkbox').forEach(cb => {
-			                const item = cb.closest('.node-type-item');
-			                if (!item.classList.contains('disabled')) {
-			                    cb.checked = savedNodeTypes.includes(cb.value);
-			                    if (cb.checked) {
-			                        item.classList.add('selected');
-			                    }
-			                } else {
-			                    cb.checked = false;
-			                    item.classList.remove('selected');
-			                }
-			            });
-			            
-			            const savedProtocols = Array.isArray(cfg.protocols) && cfg.protocols.length > 0
-			                ? cfg.protocols
-			                : ["vless", "trojan"];
-			            document.querySelectorAll('.protocol-checkbox').forEach(cb => {
-			                const item = cb.closest('.node-type-item');
-			                cb.checked = savedProtocols.includes(cb.value);
-			                if (cb.checked) {
-			                    item.classList.add('selected');
-			                } else {
-			                    item.classList.remove('selected');
-			                }
-			            });
-			            
-			            if (Array.isArray(cfg.domains)) {
-			                state.domains = cfg.domains.map(item => {
-			                    if (typeof item === 'string') {
-			                        return { ip: item, remark: '' };
-			                    }
-			                    return item;
-			                });
-			            } else {
-			                state.domains = [];
-			            }
-			            
-			            if ((cfg.domain || '').trim() && !state.domains.some(x => x.ip === cfg.domain.trim())) {
-			                state.domains.unshift({ ip: cfg.domain.trim(), remark: '' });
-			            }
-			            
-			            state.ports = (Array.isArray(cfg.ports) ? cfg.ports : [])
-			                .map(x => parseInt(x, 10))
-			                .filter(n => n > 0 && n <= 65535);
-			            
-			            if (parseInt(cfg.port, 10)) state.ports.unshift(parseInt(cfg.port, 10));
-			            
-			            state.ports = [...new Set(state.ports)];
-			            
-			            renderList(document.getElementById('domains'), state.domains, '', false);
-			            renderList(document.getElementById('ports'), state.ports, '如: 443', true);
-			            
-			            showMessage('✅ 配置加载成功', 'success');
-			        } catch (e) {
-			            showMessage('❌ 配置加载失败', 'error');
-			        }
-			    }
-			
-			    let originalUuid = '';
+				var toastEl = document.getElementById('toast');
+				var msgEl = document.getElementById('message');
+				function showToast(m) { toastEl.textContent = m; toastEl.classList.add('show'); setTimeout(function () { toastEl.classList.remove('show'); }, 2000); }
+				function showMessage(t, type) { msgEl.textContent = t; msgEl.className = 'message ' + type; msgEl.style.display = 'block'; setTimeout(function () { msgEl.style.display = 'none'; }, 3000); }
+				function fallbackCopy(text) {
+					var ta = document.createElement('textarea');
+					ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'absolute'; ta.style.left = '-9999px';
+					document.body.appendChild(ta); ta.select();
+					var ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+					document.body.removeChild(ta); return ok;
+				}
+				async function doCopy(btn) {
+					var t = btn.getAttribute('data-text'); if (!t) return;
+					var ok = false;
+					if (navigator.clipboard && navigator.clipboard.writeText) { try { await navigator.clipboard.writeText(t); ok = true; } catch (e) {} }
+					if (!ok) ok = fallbackCopy(t);
+					showToast(ok ? '已复制到剪贴板' : '复制失败');
+				}
+				document.querySelectorAll('button.copy').forEach(function (b) { b.addEventListener('click', function (e) { doCopy(e.currentTarget); }); });
 
-			    async function saveConfigForm() {
-			        const uuid = document.getElementById('uuid').value.trim();
-			        // UUID 格式在前端先挡一道，省得跑到服务端才报错。
-			        // 注意：面板 HTML 是模板字符串，这里刻意不用正则，避免反斜杠被模板转义吃掉。
-			        if (!uuid) {
-			            showMessage('❌ UUID 不能为空', 'error');
-			            return;
-			        }
-			        if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(uuid)) {
-			            showMessage('❌ UUID 格式不正确，需为标准 UUID（8-4-4-4-12 位十六进制）', 'error');
-			            return;
-			        }
-                        const s5 = document.getElementById('s5').value.trim();
-                        const proxyIp = document.getElementById('proxyIp').value.trim();
-                        const fallbackTimeout = parseInt(document.getElementById('fallbackTimeout').value, 10) || 100;
-                        const bestIpApi = document.getElementById('bestIpApi').value.trim() || 'https://ipdb.api.030101.xyz/?type=bestcf';
-                        const subLinkBase = document.getElementById('subLinkBase').value.trim();
-                        // 注意：面板 HTML 是模板字符串，这里刻意不用正则，避免反斜杠被模板转义吃掉
-                        if (subLinkBase && !(subLinkBase.startsWith('http://') || subLinkBase.startsWith('https://'))) {
-                            showMessage('❌ 订阅转换服务地址需以 http:// 或 https:// 开头', 'error');
-                            return;
-                        }
-                        if (subLinkBase && (subLinkBase.indexOf('?') !== -1 || subLinkBase.indexOf('#') !== -1)) {
-                            showMessage('❌ 订阅转换服务地址只填服务根地址，不要带 ? 参数', 'error');
-                            return;
-                        }
-                        const autoUpdateBestIp = document.getElementById('autoUpdateBestIp').checked;
-                        const ech = document.getElementById('echEnabled').checked;
-                        const echSni = document.getElementById('echSni').value.trim();
-                        const echDns = document.getElementById('echDns').value.trim();
-                        const echConfig = { sni: echSni, dns: echDns };
-			        
-			        const nodeTypes = [];
-			        document.querySelectorAll('.node-type-checkbox').forEach(cb => {
-			            if (cb.checked && !cb.closest('.node-type-item').classList.contains('disabled')) {
-			                nodeTypes.push(cb.value);
-			            }
-			        });
-			        
-			        if (nodeTypes.length === 0) {
-			            showMessage('❌ 请至少选择一个节点类型', 'error');
-			            return;
-			        }
-			        
-			        const protocols = [];
-			        document.querySelectorAll('.protocol-checkbox').forEach(cb => {
-			            if (cb.checked) {
-			                protocols.push(cb.value);
-			            }
-			        });
-			        
-			        if (protocols.length === 0) {
-			            showMessage('❌ 请至少选择一个协议类型', 'error');
-			            return;
-			        }
-			        
-			        const domainItems = Array.from(document.querySelectorAll('#domains .list-item'));
-			        const domains = [];
-			        domainItems.forEach(row => {
-			            const inputs = row.querySelectorAll('input');
-			            if (inputs.length >= 2) {
-			                const ip = inputs[0].value.trim();
-			                const remark = inputs[1].value.trim();
-			                if (ip) domains.push({ ip, remark });
-			            }
-			        });
-			        
-			        const ports = Array.from(document.querySelectorAll('#ports .list-item input'))
-			            .map(i => parseInt(i.value, 10))
-			            .filter(n => n > 0 && n <= 65535);
-			        
-			        const body = { uuid, s5, proxyIp, domains, ports, fallbackTimeout, subLinkBase, bestIpApi, autoUpdateBestIp, nodeTypes, protocols, ech, echConfig };
-			        
-			        const response = await fetch('/api/config', {
-			            method: 'POST',
-			            headers: { 'content-type': 'application/json' },
-			            body: JSON.stringify(body)
-			        });
-			        
-			        const result = await response.json();
-			        
-			        if (response.ok) {
-			            if (uuid === originalUuid) {
-			                // UUID 没变，session 依然有效，不用重新登录
-			                showMessage('✅ 配置保存成功', 'success');
-			            } else {
-			                showMessage('✅ 配置保存成功，请使用新 UUID 重新登录', 'success');
-			                // 保存成功后旧 Cookie 里的 session 就失效了（UUID 变了），
-			                // 主动清掉再跳回登录页，避免用户看到空的登录框反复试。
-			                document.cookie = 'session=; Path=/; Max-Age=0; SameSite=Lax';
-			                setTimeout(() => {
-			                    window.location.href = '/';
-			                }, 800);
-			            }
-			        } else {
-			            showMessage('❌ ' + (result.error || '配置保存失败'), 'error');
-			        }
-			    }
-			
-			    document.addEventListener('DOMContentLoaded', () => {
-			        const collapseHeaders = document.querySelectorAll('.collapse-header');
-			        collapseHeaders.forEach(header => {
-			            header.addEventListener('click', () => {
-			                const targetId = header.getAttribute('data-collapse');
-			                const content = document.getElementById(targetId);
-			                const isActive = header.classList.contains('active');
-			                
-			                if (isActive) {
-			                    header.classList.remove('active');
-			                    content.classList.remove('active');
-			                } else {
-			                    header.classList.add('active');
-			                    content.classList.add('active');
-			                }
-			            });
-			        });
-			        
-			        const addDomain = document.getElementById('addDomain');
-			        const addPort = document.getElementById('addPort');
-			        const domainNew = document.getElementById('domainNew');
-			        const domainRemarkNew = document.getElementById('domainRemarkNew');
-			        const portNew = document.getElementById('portNew');
-			        const reloadBtn = document.getElementById('reloadBtn');
-			        const toggleBestIpSettings = document.getElementById('toggleBestIpSettings');
-			        const fetchBestIp = document.getElementById('fetchBestIp');
-			        
-			        addDomain && addDomain.addEventListener('click', () => {
-			            const v = (domainNew.value || '').trim();
-			            const r = (domainRemarkNew.value || '').trim();
-			            if (!v) return;
-			            state.domains.push({ ip: v, remark: r });
-			            renderList(document.getElementById('domains'), state.domains, '', false);
-			            domainNew.value = '';
-			            domainRemarkNew.value = '';
-			        });
-			        
-			        addPort && addPort.addEventListener('click', () => {
-			            const n = parseInt(portNew.value || '0', 10);
-			            if (!n || n < 1 || n > 65535) return;
-			            state.ports.push(n);
-			            renderList(document.getElementById('ports'), state.ports, '如: 443', true);
-			            portNew.value = '';
-			        });
-			        
-			        reloadBtn && reloadBtn.addEventListener('click', () => {
-			            loadConfig();
-			        });
-			        
-			        toggleBestIpSettings && toggleBestIpSettings.addEventListener('click', () => {
-			            const settings = document.getElementById('bestIpSettings');
-				            if (settings.style.display === 'none') {
-				                settings.style.display = 'block';
-				            } else {
-				                settings.style.display = 'none';
-				            }
-				        });
+				document.getElementById('exportNodes').addEventListener('click', async function () {
+					var nodeText = ${allNodesJson}.join('\\n') + '\\n';
+					var b64 = btoa(unescape(encodeURIComponent(nodeText)));
+					var ok = false;
+					if (navigator.clipboard && navigator.clipboard.writeText) { try { await navigator.clipboard.writeText(b64); ok = true; } catch (e) {} }
+					if (!ok) ok = fallbackCopy(b64);
+					showToast(ok ? '已导出到剪贴板' : '导出失败');
+				});
 
-				        const toggleEchSettings = document.getElementById('toggleEchSettings');
-				        toggleEchSettings && toggleEchSettings.addEventListener('click', () => {
-				            const echSettings = document.getElementById('echSettings');
-				            if (echSettings.style.display === 'none') {
-				                echSettings.style.display = 'block';
-				            } else {
-				                echSettings.style.display = 'none';
-				            }
-				        });
-			        
-			        fetchBestIp && fetchBestIp.addEventListener('click', async () => {
-			            const uuid = document.getElementById('uuid').value.trim() || '${userUUID}';
-			            const bestIpApiInput = document.getElementById('bestIpApi');
-			            const apiUrl = bestIpApiInput.value.trim() || 'https://ipdb.api.030101.xyz/?type=bestcf';
-			
-			            const originalText = fetchBestIp.textContent;
-			            fetchBestIp.textContent = '⏳ 获取中...';
-			            fetchBestIp.disabled = true;
-			
-			            try {
-			                const response = await fetch('/api/fetch-best-ip', {
-			                    method: 'POST',
-			                    headers: { 'Content-Type': 'application/json' },
-			                    body: JSON.stringify({ uuid, apiUrl })
-			                });
-			                const result = await response.json();
-			
-			                if (result.success && result.ips && result.ips.length > 0) {
-			                    const existingIps = new Set(state.domains.map(d => d.ip));
-			                    let addedCount = 0;
-			                    result.ips.forEach(ip => {
-			                        if (!existingIps.has(ip)) {
-			                            state.domains.push({ ip, remark: '优选IP' });
-			                            addedCount++;
-			                        }
-			                    });
-			                    renderList(document.getElementById('domains'), state.domains, '', false);
-			                    showMessage('✅ 成功添加 ' + addedCount + ' 个优选IP', 'success');
-			                } else {
-			                    showMessage('❌ 未获取到优选IP', 'error');
-			                }
-			            } catch (error) {
-			                showMessage('❌ 获取优选IP失败: ' + error.message, 'error');
-			            } finally {
-			                fetchBestIp.textContent = originalText;
-			                fetchBestIp.disabled = false;
-			            }
-			        });
-			        
-			        // 监听其它代理和 ProxyIP 输入变化，动态更新节点类型可用性
-			        const s5Input = document.getElementById('s5');
-			        const proxyIpInput = document.getElementById('proxyIp');
-			        s5Input && s5Input.addEventListener('input', () => {
-			            updateNodeTypeAvailability();
-			            // 如果因禁用被取消勾选，需要更新样式
-			            updateNodeTypeSelectedStyle();
-			        });
-			        proxyIpInput && proxyIpInput.addEventListener('input', () => {
-			            updateNodeTypeAvailability();
-			            updateNodeTypeSelectedStyle();
-			        });
-			        
-			        document.querySelectorAll('.node-type-item').forEach(item => {
-			            item.addEventListener('click', (e) => {
-			                const checkbox = item.querySelector('input[type="checkbox"]');
-			                if (item.classList.contains('disabled') || !checkbox) {
-			                    e.preventDefault();
-			                    return;
-			                }
-			                if (e.target !== checkbox) {
-			                    checkbox.checked = !checkbox.checked;
-			                }
-			                if (checkbox.checked) {
-			                    item.classList.add('selected');
-			                } else {
-			                    item.classList.remove('selected');
-			                }
-			            });
-			        });
-			    });
-			
-			    document.getElementById('configForm').addEventListener('submit', function(e) {
-			        e.preventDefault();
-			        saveConfigForm();
-			    });
-			
-			    loadConfig();
+				var qrCode = null;
+				document.getElementById('showQrBtn').addEventListener('click', function () {
+					document.getElementById('qrModal').classList.add('active');
+					if (!qrCode) qrCode = new QRCode(document.getElementById('qrCanvas'), { text: '${subUrl}', width: 220, height: 220, colorDark: '#2563eb', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M });
+				});
+				document.getElementById('closeQrBtn').addEventListener('click', function () { document.getElementById('qrModal').classList.remove('active'); });
+				document.getElementById('qrModal').addEventListener('click', function (e) { if (e.target === document.getElementById('qrModal')) document.getElementById('qrModal').classList.remove('active'); });
+
+				// 折叠（通用，含内层）
+				document.querySelectorAll('.collapse-header').forEach(function (h) {
+					h.addEventListener('click', function () {
+						var c = document.getElementById(h.getAttribute('data-collapse'));
+						if (!c) return;
+						var on = h.classList.toggle('active');
+						c.classList.toggle('active', on);
+					});
+				});
+				// 全局代理开关不触发折叠
+				document.getElementById('globalProxyWrap').addEventListener('click', function (e) { e.stopPropagation(); });
+
+				// 协议选择
+				document.querySelectorAll('.proto-pill').forEach(function (p) {
+					p.addEventListener('click', function () {
+						var cb = p.querySelector('input');
+						cb.checked = !cb.checked;
+						p.classList.toggle('on', cb.checked);
+					});
+				});
+
+				// 列表渲染
+				function delBtn(onClick) { var d = document.createElement('button'); d.type = 'button'; d.className = 'btn btn-danger chip'; d.textContent = '删除'; d.addEventListener('click', onClick); return d; }
+				function renderStrList(container, rows, placeholder) {
+					container.innerHTML = '';
+					rows.forEach(function (v, idx) {
+						var row = document.createElement('div'); row.className = 'list-item';
+						var a = document.createElement('input'); a.type = 'text'; a.value = v; a.placeholder = placeholder;
+						a.addEventListener('input', function () { rows[idx] = a.value.trim(); });
+						row.appendChild(a);
+						row.appendChild(delBtn(function () { rows.splice(idx, 1); renderStrList(container, rows, placeholder); }));
+						container.appendChild(row);
+					});
+				}
+				function renderPairList(container, rows, p1, p2) {
+					container.innerHTML = '';
+					rows.forEach(function (it, idx) {
+						var row = document.createElement('div'); row.className = 'list-item';
+						var a = document.createElement('input'); a.type = 'text'; a.value = it.first; a.placeholder = p1;
+						var b = document.createElement('input'); b.type = 'text'; b.value = it.second; b.placeholder = p2;
+						a.addEventListener('input', function () { it.first = a.value.trim(); });
+						b.addEventListener('input', function () { it.second = b.value.trim(); });
+						row.appendChild(a); row.appendChild(b);
+						row.appendChild(delBtn(function () { rows.splice(idx, 1); renderPairList(container, rows, p1, p2); }));
+						container.appendChild(row);
+					});
+				}
+
+				var state = { domains: [], proxyIps: [], entries: [], proxies: [] };
+
+				function isUuid(s) {
+					if (s.length !== 36) return false;
+					var hex = '0123456789abcdefABCDEF';
+					for (var i = 0; i < 36; i++) {
+						var c = s.charAt(i);
+						if (i === 8 || i === 13 || i === 18 || i === 23) { if (c !== '-') return false; }
+						else if (hex.indexOf(c) === -1) return false;
+					}
+					return true;
+				}
+
+				var originalUuid = '';
+
+				async function loadConfig() {
+					try {
+						var res = await fetch('/api/config');
+						if (!res.ok) throw 0;
+						var cfg = await res.json();
+						originalUuid = cfg.uuid || '';
+						document.getElementById('uuid').value = cfg.uuid || '';
+						document.getElementById('fallbackTimeout').value = cfg.fallbackTimeout || 100;
+						document.getElementById('bestIpApi').value = cfg.bestIpApi || 'https://ipdb.api.030101.xyz/?type=bestcf';
+						document.getElementById('subLinkBase').value = cfg.subLinkBase || '${DEFAULT_SUBLINK_BASE}';
+						document.getElementById('echEnabled').checked = !!cfg.ech;
+						var echCfg = (cfg.echConfig && typeof cfg.echConfig === 'object') ? cfg.echConfig : {};
+						document.getElementById('echSni').value = echCfg.sni || '';
+						document.getElementById('echDns').value = echCfg.dns || '';
+						document.getElementById('autoUpdateBestIp').checked = !!cfg.autoUpdateBestIp;
+						document.getElementById('globalProxy').checked = !!cfg.globalProxy;
+
+						var protos = (Array.isArray(cfg.protocols) && cfg.protocols.length) ? cfg.protocols : ['vless', 'trojan'];
+						document.querySelectorAll('.proto-pill').forEach(function (p) {
+							var cb = p.querySelector('input');
+							cb.checked = protos.indexOf(cb.value) !== -1;
+							p.classList.toggle('on', cb.checked);
+						});
+
+						state.domains = (cfg.domains || []).map(function (x) { return typeof x === 'string' ? { first: x, second: '' } : { first: x.ip || '', second: x.remark || '' }; });
+						state.proxyIps = (cfg.proxyIps || []).map(function (x) { return String(x || ''); });
+						state.entries = (cfg.entries || []).map(function (x) { return String(x || ''); });
+						state.proxies = (cfg.proxies || []).map(function (x) { return { first: (x.proxy || ''), second: (x.remark || '') }; });
+
+						renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
+						renderStrList(document.getElementById('proxyIps'), state.proxyIps, 'host:port 或 host');
+						renderStrList(document.getElementById('entries'), state.entries, 'IP或域名');
+						renderPairList(document.getElementById('proxies'), state.proxies, '代理地址', '输入备注');
+
+						showMessage('配置加载成功', 'success');
+					} catch (e) { showMessage('配置加载失败', 'error'); }
+				}
+
+				async function saveConfigForm() {
+					var uuid = document.getElementById('uuid').value.trim();
+					if (!uuid) { showMessage('UUID 不能为空', 'error'); return; }
+					if (!isUuid(uuid)) { showMessage('UUID 格式不正确，需为标准 UUID（8-4-4-4-12 位十六进制）', 'error'); return; }
+					var subLinkBase = document.getElementById('subLinkBase').value.trim();
+					if (subLinkBase && !(subLinkBase.indexOf('http://') === 0 || subLinkBase.indexOf('https://') === 0)) { showMessage('订阅转换服务地址需以 http:// 或 https:// 开头', 'error'); return; }
+					if (subLinkBase && (subLinkBase.indexOf('?') !== -1 || subLinkBase.indexOf('#') !== -1)) { showMessage('订阅转换服务地址只填服务根地址，不要带 ? 参数', 'error'); return; }
+					var protocols = [];
+					document.querySelectorAll('.proto-pill input').forEach(function (cb) { if (cb.checked) protocols.push(cb.value); });
+					if (!protocols.length) { showMessage('请至少选择一个协议类型', 'error'); return; }
+					var body = {
+						uuid: uuid,
+						domains: state.domains.filter(function (x) { return x.first; }).map(function (x) { return { ip: x.first, remark: x.second }; }),
+						proxyIps: state.proxyIps.filter(Boolean),
+						entries: state.entries.filter(Boolean),
+						proxies: state.proxies.filter(function (x) { return x.first; }).map(function (x) { return { proxy: x.first, remark: x.second }; }),
+						globalProxy: document.getElementById('globalProxy').checked,
+						fallbackTimeout: parseInt(document.getElementById('fallbackTimeout').value, 10) || 100,
+						bestIpApi: document.getElementById('bestIpApi').value.trim() || 'https://ipdb.api.030101.xyz/?type=bestcf',
+						subLinkBase: subLinkBase,
+						autoUpdateBestIp: document.getElementById('autoUpdateBestIp').checked,
+						protocols: protocols,
+						ech: document.getElementById('echEnabled').checked,
+						echConfig: { sni: document.getElementById('echSni').value.trim(), dns: document.getElementById('echDns').value.trim() }
+					};
+					var res = await fetch('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+					var result = await res.json();
+					if (res.ok) {
+						if (uuid === originalUuid) { showMessage('配置保存成功', 'success'); }
+						else {
+							showMessage('配置保存成功，请使用新 UUID 重新登录', 'success');
+							document.cookie = 'session=; Path=/; Max-Age=0; SameSite=Lax';
+							setTimeout(function () { window.location.href = '/'; }, 800);
+						}
+					} else { showMessage((result.error || '配置保存失败'), 'error'); }
+				}
+
+				function bindAdd(btnId, inputId, remarkId, kind) {
+					var btn = document.getElementById(btnId); if (!btn) return;
+					btn.addEventListener('click', function () {
+						var v = document.getElementById(inputId).value.trim();
+						if (kind === 'pair') {
+							var r = document.getElementById(remarkId).value.trim();
+							if (!v) return;
+							state.domains.push({ first: v, second: r });
+							renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
+						} else if (kind === 'proxy') {
+							var r2 = document.getElementById(remarkId).value.trim();
+							if (!v) return;
+							state.proxies.push({ first: v, second: r2 });
+							renderPairList(document.getElementById('proxies'), state.proxies, '代理地址', '输入备注');
+						} else if (kind === 'proxyIp') {
+							if (!v) return;
+							state.proxyIps.push(v);
+							renderStrList(document.getElementById('proxyIps'), state.proxyIps, 'host:port 或 host');
+						} else if (kind === 'entry') {
+							if (!v) return;
+							state.entries.push(v);
+							renderStrList(document.getElementById('entries'), state.entries, 'IP或域名');
+						}
+						document.getElementById(inputId).value = '';
+						document.getElementById(remarkId).value = '';
+					});
+				}
+
+				document.addEventListener('DOMContentLoaded', function () {
+					bindAdd('addDomain', 'domainNew', 'domainRemarkNew', 'pair');
+					bindAdd('addProxyIp', 'proxyIpNew', 'proxyIpNew', 'proxyIp');
+					bindAdd('addEntry', 'entryNew', 'entryNew', 'entry');
+					bindAdd('addProxy', 'proxyNew', 'proxyRemarkNew', 'proxy');
+
+					document.getElementById('reloadBtn').addEventListener('click', loadConfig);
+
+					document.getElementById('toggleBestIpSettings').addEventListener('click', function () {
+						var s = document.getElementById('bestIpSettings');
+						s.style.display = s.style.display === 'none' ? 'block' : 'none';
+					});
+					document.getElementById('toggleEchSettings').addEventListener('click', function () {
+						var s = document.getElementById('echSettings');
+						s.style.display = s.style.display === 'none' ? 'block' : 'none';
+					});
+
+					document.getElementById('fetchBestIp').addEventListener('click', async function () {
+						var btn = this;
+						var old = btn.textContent;
+						btn.textContent = '获取中...'; btn.disabled = true;
+						try {
+							var res = await fetch('/api/fetch-best-ip', {
+								method: 'POST', headers: { 'Content-Type': 'application/json' },
+								body: JSON.stringify({ uuid: document.getElementById('uuid').value.trim() || '${userUUID}', apiUrl: document.getElementById('bestIpApi').value.trim() })
+							});
+							var result = await res.json();
+							if (result.success && result.ips && result.ips.length) {
+								var existing = {}; state.domains.forEach(function (d) { existing[d.first] = 1; });
+								var added = 0;
+								result.ips.forEach(function (ip) { if (!existing[ip]) { state.domains.push({ first: ip, second: '优选IP' }); existing[ip] = 1; added++; } });
+								renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
+								showMessage('成功添加 ' + added + ' 个优选IP', 'success');
+							} else { showMessage('未获取到优选IP', 'error'); }
+						} catch (e) { showMessage('获取优选IP失败: ' + e.message, 'error'); }
+						finally { btn.textContent = old; btn.disabled = false; }
+					});
+				});
+
+				document.getElementById('configForm').addEventListener('submit', function (e) { e.preventDefault(); saveConfigForm(); });
+
+				loadConfig();
 			})();
 		</script>
+	</div>
 </body>
-</html>`;
+</html>
+`;
             const panelHeaders = { "content-type": "text/html; charset=utf-8" };
             if (cookieSetHeader) panelHeaders["set-cookie"] = cookieSetHeader;
             return new Response(html, { headers: panelHeaders });
@@ -4513,18 +3457,7 @@ export default {
                 const ips = newIps.filter(ip => ipv4Regex.test(ip) || ipv6Regex.test(ip));
 
                 if (ips.length > 0) {
-                    let domains = Array.isArray(cfg.domains)
-                        ? cfg.domains.map((item) => {
-                            if (typeof item === 'string') {
-                                return { ip: item, remark: '' };
-                            }
-                            return item;
-                        }).filter(x => x && x.ip)
-                        : [];
-
-                    if (cfg.domain && !domains.some(x => x.ip === cfg.domain)) {
-                        domains.unshift({ ip: cfg.domain, remark: '' });
-                    }
+                    let domains = normalizeDomains(cfg.domains);
 
                     const existingIps = new Set(domains.map(d => d.ip));
                     const nonPreferredIps = domains.filter(d => d.remark !== '优选IP');
@@ -4540,18 +3473,16 @@ export default {
 
                     const normalized = {
                         uuid: cfg.uuid,
-                        domain: domains[0]?.ip || '',
-                        port: cfg.port,
-                        s5: cfg.s5 || '',
-                        proxyIp: cfg.proxyIp || '',
                         domains: domains,
-                        ports: cfg.ports || [443],
+                        proxyIps: cfg.proxyIps || [],
+                        entries: cfg.entries || [],
+                        proxies: cfg.proxies || [],
+                        globalProxy: !!cfg.globalProxy,
                         fallbackTimeout: cfg.fallbackTimeout || 100,
                         // 注意：这里会整份回写配置，前端新增的字段必须一并带上，否则会被定时任务抹掉
                         subLinkBase: normalizeSubLinkBase(cfg.subLinkBase) || DEFAULT_SUBLINK_BASE,
                         bestIpApi: cfg.bestIpApi,
                         autoUpdateBestIp: cfg.autoUpdateBestIp,
-                        nodeTypes: cfg.nodeTypes && cfg.nodeTypes.length > 0 ? cfg.nodeTypes : ["direct"],
                         protocols: cfg.protocols && cfg.protocols.length > 0 ? cfg.protocols : ["vless", "trojan"],
                         ech: !!cfg.ech,
                         echConfig: {
