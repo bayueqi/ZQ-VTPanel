@@ -3174,12 +3174,11 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 				document.getElementById('closeQrBtn').addEventListener('click', function () { document.getElementById('qrModal').classList.remove('active'); });
 				document.getElementById('qrModal').addEventListener('click', function (e) { if (e.target === document.getElementById('qrModal')) document.getElementById('qrModal').classList.remove('active'); });
 
-				// 折叠（通用，含内层）：max-height 用精确内容高度，动画才丝滑；内层展开后同步外层高度
-				// 折叠（通用，含内层）：精确 max-height 过渡；过渡结束后同步外层，避免内层撑高后外层仍被裁
-				function syncHeights() {
-					var list = document.querySelectorAll('.collapse-content.active');
-					for (var i = list.length - 1; i >= 0; i--) list[i].style.maxHeight = list[i].scrollHeight + 'px';
-				}
+				// 折叠（通用，含内层）：max-height 精确过渡，过渡结束后置 none，
+				// 这样列表增删、内层展开都不会再把内容裁掉
+				function setH(c) { if (c.style.maxHeight !== 'none') c.style.maxHeight = c.scrollHeight + 'px'; }
+				function syncHeights() { document.querySelectorAll('.collapse-content.active').forEach(setH); }
+				function settle(c) { if (c.classList.contains('active')) c.style.maxHeight = 'none'; }
 				document.querySelectorAll('.collapse-header').forEach(function (h) {
 					h.addEventListener('click', function () {
 						var c = document.getElementById(h.getAttribute('data-collapse'));
@@ -3187,11 +3186,19 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						var on = !c.classList.contains('active');
 						h.classList.toggle('active', on);
 						c.classList.toggle('active', on);
-						c.style.maxHeight = on ? c.scrollHeight + 'px' : '0px';
-						setTimeout(syncHeights, 350);
+						if (on) {
+							c.style.maxHeight = '0px';
+							void c.offsetHeight;
+							setH(c);
+							setTimeout(syncHeights, 0);
+							setTimeout(function () { settle(c); }, 320);
+						} else {
+							if (c.style.maxHeight === 'none') { c.style.maxHeight = c.scrollHeight + 'px'; void c.offsetHeight; }
+							c.style.maxHeight = '0px';
+						}
 					});
 				});
-				syncHeights();
+				document.querySelectorAll('.collapse-content.active').forEach(settle);
 				window.addEventListener('resize', syncHeights);
 				// 全局代理开关不触发折叠
 				document.getElementById('globalProxyWrap').addEventListener('click', function (e) { e.stopPropagation(); });
