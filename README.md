@@ -1,7 +1,6 @@
 # ZQ-VTPanel
 
-![页面](src/优化界面.png)
-![页面](src/管理界面.png)
+![界面](src/界面.png)
 
 一个跑在 Cloudflare Workers 上的 VLESS / Trojan 节点面板，一份代码同时是节点隧道、订阅分发器和 Web 管理后台。
 
