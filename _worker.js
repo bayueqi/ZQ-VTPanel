@@ -2940,7 +2940,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .sub-block .collapse-content.active{max-height:3000px;padding:16px}
 .sub-block .form-group{margin-bottom:16px}
 .sub-block .form-group:last-child{margin-bottom:0}
-.sub-note{font-size:14px;font-weight:400;color:var(--muted);margin:0 0 8px;line-height:1.5}
+.sub-note{font-size:16px;font-weight:400;color:var(--muted);margin:0 0 8px;line-height:1.5}
 .sub-note .note-label{font-weight:600;color:var(--text)}
 .sub-hint{font-size:12px;font-weight:400;color:var(--muted)}
 .gt-switch{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none;flex:none}
