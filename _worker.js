@@ -2924,7 +2924,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .collapse-header:hover{background:rgba(255,255,255,.35)}
 .collapse-header .icon{transition:transform .3s}
 .collapse-header.active .icon{transform:rotate(180deg)}
-.collapse-content{max-height:0;overflow:hidden;transition:max-height .3s ease,padding .3s ease;padding:0 20px}
+.collapse-content{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 20px}
 .collapse-content.active{max-height:3000px;padding:20px}
 .ch-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .ch-dot{width:9px;height:9px;border-radius:3px;flex:none}
@@ -3196,8 +3196,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 					});
 				});
 				syncHeights();
-				window.addEventListener('resize', syncHeights);
-				// 全局代理开关不触发折叠
+				window.addEventListener('resize', syncHeights);				// 全局代理开关不触发折叠
 				document.getElementById('globalProxyWrap').addEventListener('click', function (e) { e.stopPropagation(); });
 
 				// 协议选择
@@ -3284,6 +3283,8 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						renderStrList(document.getElementById('proxyIps'), state.proxyIps, 'host:port 或 host');
 						renderStrList(document.getElementById('entries'), state.entries, 'IP或域名');
 						renderPairList(document.getElementById('proxies'), state.proxies, '代理地址', '输入备注');
+						// 列表填充后内容变高，重量一次已展开块的高度，不然会被 max-height 截断
+						setTimeout(syncHeights, 0);
 
 						showMessage('配置加载成功', 'success');
 					} catch (e) { showMessage('配置加载失败', 'error'); }
