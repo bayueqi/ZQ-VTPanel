@@ -2931,7 +2931,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .ch-dot{width:9px;height:9px;border-radius:3px;flex:none}
 .sub-block{border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.4);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);overflow:hidden}
 .sub-block + .sub-block{margin-top:12px}
-.sub-head{width:100%;padding:14px 16px;font-size:13.5px;font-weight:700;color:var(--text);background:rgba(255,255,255,.35);border:none;border-radius:0;display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;text-align:left;transition:.25s}
+.sub-head{width:100%;padding:14px 16px;font-size:16px;font-weight:700;color:var(--text);background:rgba(255,255,255,.35);border:none;border-radius:0;display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;text-align:left;transition:.25s}
 .sub-head:hover{background:rgba(255,255,255,.55)}
 .sub-head .icon{font-size:13px;color:var(--muted)}
 	.sub-title{display:inline-flex;align-items:center;gap:8px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2989,6 +2989,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 	.input-group input,.list-item input{min-width:0}
 	.input-group .btn,.list-item .btn{padding:10px 12px;font-size:12px;margin-bottom:0}
 	.link-arrow{width:28px;height:28px;margin-left:4px}
+	.sub-head{font-size:15px;padding:13px 14px}
 	.sub-block .collapse-content.active{padding:14px 12px}
 	.qr-content{padding:24px 18px}
 }
