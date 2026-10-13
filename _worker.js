@@ -2939,9 +2939,6 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .sub-block .collapse-content.active{max-height:3000px;padding:16px}
 .sub-block .form-group{margin-bottom:16px}
 .sub-block .form-group:last-child{margin-bottom:0}
-.sub-note{font-size:16px;font-weight:400;color:var(--muted);margin:0 0 8px;line-height:1.5}
-.sub-note .note-label{font-weight:600;color:var(--text)}
-.sub-hint{font-size:12px;font-weight:400;color:var(--muted)}
 .gt-switch{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none;flex:none}
 .panel-in{animation:panelIn .22s ease}
 .panel-out{animation:panelOut .18s ease forwards}
@@ -3088,7 +3085,6 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 								<div class="label-with-link">
 									<label style="margin:0">ProxyIP</label>
 									<a href="https://ipdb.030101.xyz/bestproxy/" target="_blank" rel="nofollow noopener" class="link-arrow" title="ProxyIP地址"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M3.5 9.5L9.5 3.5M9.5 3.5H5M9.5 3.5V8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
-									<span class="sub-hint" style="margin-left:8px">与上面优选IP 自由组合</span>
 								</div>
 								<div id="proxyIps" class="list"></div>
 								<div class="input-group">
@@ -3102,7 +3098,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						<div class="collapse-header sub-head active" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理</label><span class="icon">▼</span></span></div>
 						<div class="collapse-content active" id="node-exit"><div class="cc-inner">
 							<div class="form-group">
-								<div class="sub-note"><span class="note-label">入口地址</span> 可填优选IP或域名，留空用本项目域名；入口地址 × 代理，各出一组节点</div>
+								<label>入口地址</label>
 								<div id="entries" class="list"></div>
 								<div class="input-group">
 									<input type="text" id="entryNew" placeholder="输入IP或域名">
@@ -3110,7 +3106,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 								</div>
 							</div>
 							<div class="form-group">
-								<div class="sub-note" style="margin-top:16px"><span class="note-label">其它代理</span> 支持 socks5 / http / https / sstp / turn</div>
+								<label>其它代理</label>
 								<div id="proxies" class="list"></div>
 								<div class="input-group">
 									<input type="text" id="proxyNew" placeholder="格式 [协议://]user:pass@host:port">
