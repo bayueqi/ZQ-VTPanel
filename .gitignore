@@ -1,7 +1,0 @@
-# 工作区记忆（不提交）
-.workbuddy/
-
-# 依赖与临时文件
-node_modules/
-*.log
-.DS_Store
