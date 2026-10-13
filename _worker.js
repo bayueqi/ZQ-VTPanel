@@ -2729,7 +2729,7 @@ export default {
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width,initial-scale=1">
 	<title>ZQ-VTPanel</title>
-	<link rel="icon" type="image/png" href="http://img.520jk.cc.cd/i/2026/10/10/726865.webp">
+	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%232563eb%22%2F%3E%3Cstop%20offset%3D%22.55%22%20stop-color%3D%22%233b82f6%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237c3aed%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2215%22%20fill%3D%22url(%23g)%22%2F%3E%3Crect%20x%3D%226.5%22%20y%3D%226.5%22%20width%3D%2251%22%20height%3D%2251%22%20rx%3D%229.5%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-opacity%3D%22.38%22%20stroke-width%3D%221.6%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2241%22%20text-anchor%3D%22middle%22%20font-family%3D%22-apple-system%2CBlinkMacSystemFont%2C'Segoe%20UI'%2CRoboto%2CArial%2Csans-serif%22%20font-size%3D%2225%22%20font-weight%3D%22800%22%20fill%3D%22%23ffffff%22%20letter-spacing%3D%221%22%3EVT%3C%2Ftext%3E%3C%2Fsvg%3E">
 	<style>
 		:root {
 		    --primary: #2563eb;
@@ -2871,7 +2871,7 @@ export default {
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width,initial-scale=1">
 	<title>ZQ-VTPanel</title>
-	<link rel="icon" type="image/png" href="http://img.520jk.cc.cd/i/2026/10/10/726865.webp">
+	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%232563eb%22%2F%3E%3Cstop%20offset%3D%22.55%22%20stop-color%3D%22%233b82f6%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237c3aed%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2215%22%20fill%3D%22url(%23g)%22%2F%3E%3Crect%20x%3D%226.5%22%20y%3D%226.5%22%20width%3D%2251%22%20height%3D%2251%22%20rx%3D%229.5%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-opacity%3D%22.38%22%20stroke-width%3D%221.6%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2241%22%20text-anchor%3D%22middle%22%20font-family%3D%22-apple-system%2CBlinkMacSystemFont%2C'Segoe%20UI'%2CRoboto%2CArial%2Csans-serif%22%20font-size%3D%2225%22%20font-weight%3D%22800%22%20fill%3D%22%23ffffff%22%20letter-spacing%3D%221%22%3EVT%3C%2Ftext%3E%3C%2Fsvg%3E">
 	<style>
 	:root{--primary:#2563eb;--primary-light:#3b82f6;--primary-dark:#1d4ed8;--bg1:#c7d8ff;--bg2:#e3d5ff;--bg3:#ffd9ec;--glass:rgba(255,255,255,.55);--glass-strong:rgba(255,255,255,.72);--line:rgba(96,130,210,.4);--text:#1e3a5f;--muted:#64748b;--border:rgba(96,130,210,.45);--shadow:0 8px 24px rgba(37,99,235,.10);--shadow-lg:0 18px 50px rgba(37,99,235,.16)}
 *{box-sizing:border-box}
@@ -2958,7 +2958,6 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .qr-content{background:var(--glass-strong);border-radius:24px;padding:32px;text-align:center;max-width:400px;width:100%;box-shadow:var(--shadow-lg);border:1px solid var(--line);position:relative;backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);animation:rise .35s ease}
 .qr-content::before{content:'';position:absolute;top:0;left:0;right:0;height:6px;background:linear-gradient(90deg,var(--primary),var(--primary-light),#7c3aed);border-radius:24px 24px 0 0}
 .qr-title{font-size:20px;font-weight:700;color:var(--text);margin-bottom:8px}
-.qr-subtitle{color:var(--muted);font-size:14px;margin-bottom:20px}
 #qrCanvas{display:flex;justify-content:center;margin:20px 0;padding:20px;background:#fff;border-radius:16px;border:1px solid var(--border)}
 .qr-close{background:linear-gradient(135deg,var(--primary),var(--primary-light));color:#fff;border:none;padding:12px 32px;border-radius:12px;font-weight:600;cursor:pointer;transition:.25s}
 .qr-close:hover{transform:translateY(-2px)}
@@ -3128,7 +3127,6 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 		<div class="qr-modal" id="qrModal">
 			<div class="qr-content">
 				<div class="qr-title">扫码订阅</div>
-				<div class="qr-subtitle">使用客户端扫描二维码快速添加</div>
 				<div id="qrCanvas"></div>
 				<button class="qr-close" id="closeQrBtn">关闭</button>
 			</div>
