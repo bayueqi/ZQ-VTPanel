@@ -3288,7 +3288,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
 						renderStrList(document.getElementById('proxyIps'), state.proxyIps, 'host:port 或 host');
 						renderStrList(document.getElementById('entries'), state.entries, 'IP或域名');
-						renderPairList(document.getElementById('proxies'), state.proxies, '代理地址', '输入备注');
+						renderPairList(document.getElementById('proxies'), state.proxies, '格式 [协议://]user:pass@host:port', '输入备注');
 						// 列表填充后内容变高，重新同步已展开块的高度
 						setTimeout(syncHeights, 0);
 
@@ -3346,7 +3346,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 							var r2 = document.getElementById(remarkId).value.trim();
 							if (!v) return;
 							state.proxies.push({ first: v, second: r2 });
-							renderPairList(document.getElementById('proxies'), state.proxies, '代理地址', '输入备注');
+							renderPairList(document.getElementById('proxies'), state.proxies, '格式 [协议://]user:pass@host:port', '输入备注');
 						} else if (kind === 'proxyIp') {
 							if (!v) return;
 							state.proxyIps.push(v);
