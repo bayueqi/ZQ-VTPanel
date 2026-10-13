@@ -2893,7 +2893,7 @@ h1{margin:0;font-size:34px;font-weight:800;letter-spacing:.5px;background:linear
 .url-box::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--primary),var(--primary-light),#7c3aed);background-size:200% 100%;animation:shine 4s linear infinite}
 @keyframes shine{to{background-position:200% 0}}
 .button-group{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}
-.btn{flex:1;min-width:120px;padding:12px 20px;border-radius:12px;border:none;font-size:14px;font-weight:600;cursor:pointer;transition:all .25s;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn{flex:1;min-width:120px;padding:12px 20px;border-radius:12px;border:1px solid transparent;font-size:14px;font-weight:600;cursor:pointer;transition:all .25s;display:inline-flex;align-items:center;justify-content:center;gap:6px}
 .btn:active{transform:scale(.97)}
 .btn-primary{background:linear-gradient(135deg,var(--primary),var(--primary-light));color:#fff;box-shadow:0 6px 18px rgba(37,99,235,.35)}
 .btn-primary:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(37,99,235,.45)}
@@ -2907,13 +2907,12 @@ h1{margin:0;font-size:34px;font-weight:800;letter-spacing:.5px;background:linear
 label{display:block;margin-bottom:8px;font-weight:600;color:var(--text)}
 input[type=text],input[type=number]{width:100%;padding:12px 16px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.55);color:var(--text);font-size:14px;box-sizing:border-box;transition:.25s;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
 input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255,.8);box-shadow:0 0 0 4px rgba(37,99,235,.12)}
-.input-group{display:flex;gap:8px}
+.input-group{display:flex;gap:8px;align-items:center}
 .input-group input{flex:1}
 .input-group .btn,.list-item .btn{flex:none;min-width:auto;padding:10px 16px;font-size:13px}
 .list{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
 .list-item{display:flex;gap:8px;align-items:center}
 .list-item input{flex:1}
-.list-item .btn{padding:8px 12px;font-size:12px}
 .link-arrow{color:var(--primary);text-decoration:none;font-size:14px;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:8px;background:var(--glass-strong);transition:.3s;margin-left:8px;flex:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 .link-arrow:hover{background:var(--primary);color:#fff;transform:translateY(-2px)}
 .label-with-link{display:flex;align-items:center}
@@ -3001,8 +3000,8 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 		</div>
 		<div class="main-card">
 			<div class="collapse-section">
-				<button type="button" class="collapse-header active" data-collapse="sub-content"><span class="ch-title"><span class="ch-dot" style="background:#2563eb"></span>订阅链接</span><span class="icon">▼</span></button>
-				<div class="collapse-content active" id="sub-content"><div class="cc-inner">
+				<button type="button" class="collapse-header" data-collapse="sub-content"><span class="ch-title"><span class="ch-dot" style="background:#2563eb"></span>订阅链接</span><span class="icon">▼</span></button>
+				<div class="collapse-content" id="sub-content"><div class="cc-inner">
 					<div class="url-box">${subUrl}</div>
 					<div class="button-group">
 						<button type="button" class="btn btn-primary copy" data-text="${subUrl}">复制订阅链接</button>
