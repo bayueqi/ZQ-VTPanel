@@ -3054,8 +3054,8 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 				<button type="button" class="collapse-header" data-collapse="node-content"><span class="ch-title"><span class="ch-dot" style="background:#7c3aed"></span>节点配置</span><span class="icon">▼</span></button>
 				<div class="collapse-content" id="node-content"><div class="cc-inner">
 					<div class="sub-block">
-						<div class="collapse-header sub-head active" data-collapse="node-entry"><span class="sub-title"><span class="ch-dot" style="background:#0ea5e9"></span>优选IP 与 ProxyIP</span><span class="sub-right"><span class="icon">▼</span></span></div>
-						<div class="collapse-content active" id="node-entry"><div class="cc-inner">
+						<div class="collapse-header sub-head" data-collapse="node-entry"><span class="sub-title"><span class="ch-dot" style="background:#0ea5e9"></span>优选IP 与 ProxyIP</span><span class="sub-right"><span class="icon">▼</span></span></div>
+						<div class="collapse-content" id="node-entry"><div class="cc-inner">
 							<div class="form-group">
 								<div class="label-with-link">
 									<label style="margin:0">优选IP</label>
@@ -3091,8 +3091,8 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						</div></div>
 					</div>
 					<div class="sub-block">
-						<div class="collapse-header sub-head active" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理</label><span class="icon">▼</span></span></div>
-						<div class="collapse-content active" id="node-exit"><div class="cc-inner">
+						<div class="collapse-header sub-head" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理</label><span class="icon">▼</span></span></div>
+						<div class="collapse-content" id="node-exit"><div class="cc-inner">
 							<div class="form-group">
 								<label>入口地址</label>
 								<div id="entries" class="list"></div>
