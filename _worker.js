@@ -2926,6 +2926,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .collapse-header.active .icon{transform:rotate(180deg)}
 .collapse-content{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 20px}
 .collapse-content.active{max-height:3000px;padding:20px}
+.cc-inner{overflow:hidden}
 .ch-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .ch-dot{width:9px;height:9px;border-radius:3px;flex:none}
 .sub-block{border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.4);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);overflow:hidden}
@@ -2936,10 +2937,10 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 	.sub-title{display:inline-flex;align-items:center;gap:8px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 	.sub-right{display:inline-flex;align-items:center;gap:10px;flex:none}
 .sub-block .collapse-content{padding:0 16px}
-.sub-block .collapse-content.active{max-height:none;padding:16px}
+.sub-block .collapse-content.active{max-height:3000px;padding:16px}
 .sub-block .form-group{margin-bottom:16px}
 .sub-block .form-group:last-child{margin-bottom:0}
-.sub-note{font-size:12px;font-weight:400;color:var(--muted);margin:0 0 8px;line-height:1.5}
+.sub-note{font-size:14px;font-weight:400;color:var(--muted);margin:0 0 8px;line-height:1.5}
 .sub-note .note-label{font-weight:600;color:var(--text)}
 .sub-hint{font-size:12px;font-weight:400;color:var(--muted)}
 .gt-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none;flex:none}
@@ -3005,19 +3006,19 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 		<div class="main-card">
 			<div class="collapse-section">
 				<button type="button" class="collapse-header active" data-collapse="sub-content"><span class="ch-title"><span class="ch-dot" style="background:#2563eb"></span>订阅链接</span><span class="icon">▼</span></button>
-				<div class="collapse-content active" id="sub-content">
+				<div class="collapse-content active" id="sub-content"><div class="cc-inner">
 					<div class="url-box">${subUrl}</div>
 					<div class="button-group">
 						<button type="button" class="btn btn-primary copy" data-text="${subUrl}">复制订阅链接</button>
 						<button type="button" class="btn btn-secondary" id="exportNodes">导出节点信息</button>
 						<button type="button" class="btn btn-success" id="showQrBtn">显示二维码</button>
 					</div>
-				</div>
+				</div></div>
 			</div>
 			<form id="configForm">
 			<div class="collapse-section">
 				<button type="button" class="collapse-header" data-collapse="basic-content"><span class="ch-title"><span class="ch-dot" style="background:#10b981"></span>基础配置</span><span class="icon">▼</span></button>
-				<div class="collapse-content" id="basic-content">
+				<div class="collapse-content" id="basic-content"><div class="cc-inner">
 					<div class="form-group">
 						<label for="uuid">UUID</label>
 						<input type="text" id="uuid" name="uuid" required placeholder="标准格式 8-4-4-4-12 位十六进制，例 ef9d104e-ca0e-4202-ba4b-a0afb969c747">
@@ -3054,14 +3055,14 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						<label for="fallbackTimeout">回退检测时间</label>
 						<input type="number" id="fallbackTimeout" name="fallbackTimeout" min="1" max="5000" placeholder="默认100毫秒">
 					</div>
-				</div>
+				</div></div>
 			</div>
 			<div class="collapse-section">
 				<button type="button" class="collapse-header" data-collapse="node-content"><span class="ch-title"><span class="ch-dot" style="background:#7c3aed"></span>节点配置</span><span class="icon">▼</span></button>
-				<div class="collapse-content" id="node-content">
+				<div class="collapse-content" id="node-content"><div class="cc-inner">
 					<div class="sub-block">
 						<div class="collapse-header sub-head active" data-collapse="node-entry"><span class="sub-title"><span class="ch-dot" style="background:#0ea5e9"></span>优选IP 与 ProxyIP</span><span class="sub-right"><span class="icon">▼</span></span></div>
-						<div class="collapse-content active" id="node-entry">
+						<div class="collapse-content active" id="node-entry"><div class="cc-inner">
 							<div class="form-group">
 								<div class="label-with-link">
 									<label style="margin:0">优选IP</label>
@@ -3095,11 +3096,11 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 									<button type="button" id="addProxyIp" class="btn btn-secondary chip">添加</button>
 								</div>
 							</div>
-						</div>
+						</div></div>
 					</div>
 					<div class="sub-block">
 						<div class="collapse-header sub-head active" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理<span class="gt-tip">开：只走其它代理；关：优先直连，失败后回退其它代理</span></label><span class="icon">▼</span></span></div>
-						<div class="collapse-content active" id="node-exit">
+						<div class="collapse-content active" id="node-exit"><div class="cc-inner">
 							<div class="form-group">
 								<div class="sub-note"><span class="note-label">入口地址</span> 可填优选IP或域名，留空用本项目域名；入口地址 × 代理，各出一组节点</div>
 								<div id="entries" class="list"></div>
@@ -3117,9 +3118,9 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 									<button type="button" id="addProxy" class="btn btn-secondary chip">添加</button>
 								</div>
 							</div>
-						</div>
+						</div></div>
 					</div>
-				</div>
+				</div></div>
 			</div>
 			<div class="button-group">
 				<button type="submit" class="btn btn-primary">保存配置</button>
@@ -3180,6 +3181,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 				document.getElementById('qrModal').addEventListener('click', function (e) { if (e.target === document.getElementById('qrModal')) document.getElementById('qrModal').classList.remove('active'); });
 
 				// 折叠（通用，含内层）：max-height 用精确内容高度，动画才丝滑；内层展开后同步外层高度
+				// 折叠（通用，含内层）：精确 max-height 过渡；过渡结束后同步外层，避免内层撑高后外层仍被裁
 				function syncHeights() {
 					var list = document.querySelectorAll('.collapse-content.active');
 					for (var i = list.length - 1; i >= 0; i--) list[i].style.maxHeight = list[i].scrollHeight + 'px';
@@ -3192,11 +3194,12 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						h.classList.toggle('active', on);
 						c.classList.toggle('active', on);
 						c.style.maxHeight = on ? c.scrollHeight + 'px' : '0px';
-						syncHeights();
+						setTimeout(syncHeights, 350);
 					});
 				});
 				syncHeights();
-				window.addEventListener('resize', syncHeights);				// 全局代理开关不触发折叠
+				window.addEventListener('resize', syncHeights);
+				// 全局代理开关不触发折叠
 				document.getElementById('globalProxyWrap').addEventListener('click', function (e) { e.stopPropagation(); });
 
 				// 协议选择
@@ -3283,7 +3286,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						renderStrList(document.getElementById('proxyIps'), state.proxyIps, 'host:port 或 host');
 						renderStrList(document.getElementById('entries'), state.entries, 'IP或域名');
 						renderPairList(document.getElementById('proxies'), state.proxies, '代理地址', '输入备注');
-						// 列表填充后内容变高，重量一次已展开块的高度，不然会被 max-height 截断
+						// 列表填充后内容变高，重新同步已展开块的高度
 						setTimeout(syncHeights, 0);
 
 						showMessage('配置加载成功', 'success');
