@@ -72,7 +72,7 @@
 
 **优选IP 与 ProxyIP**
 
-- 优选IP：客户端入口，IP 与域名都行，可加备注；可点「自动优选」一键拉取，勾选「自动获取优选IP」后在 Worker 加 Cron Trigger 定时更新
+- 优选IP：客户端入口，IP 与域名都行，可加备注；可点「自动优选」一键拉取，勾选「自动获取优选IP」后需手动在 Worker 加 Cron Trigger 定时更新
 - ProxyIP：中转地址，可多条，与上面的优选IP 自由组合。填了 ProxyIP 后，每条「优选IP × ProxyIP」生成一个直连失败回退 ProxyIP 的节点；未填则只出直连节点
 
 **入口地址 与 其它代理**
