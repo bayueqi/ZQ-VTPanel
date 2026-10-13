@@ -2884,7 +2884,6 @@ body::after{width:500px;height:500px;background:radial-gradient(circle,rgba(168,
 .wrap{max-width:1000px;margin:0 auto;padding:32px 24px;position:relative}
 .header{text-align:center;margin-bottom:32px;padding:24px 0}
 h1{margin:0;font-size:34px;font-weight:800;letter-spacing:.5px;background:linear-gradient(135deg,var(--primary),var(--primary-light),#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.subtitle{color:var(--muted);margin-top:8px;font-size:14px}
 .topbar{position:absolute;right:24px;top:32px;display:flex;gap:12px}
 .topbar a{width:44px;height:44px;border-radius:14px;background:var(--glass);border:1px solid var(--line);color:var(--primary);display:inline-flex;align-items:center;justify-content:center;transition:.3s;box-shadow:var(--shadow);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
 .topbar a:hover{background:var(--primary);color:#fff;transform:translateY(-3px) scale(1.05);box-shadow:var(--shadow-lg)}
@@ -2977,7 +2976,6 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 	.wrap{padding:16px 12px 32px}
 	.header{margin-bottom:18px;padding:14px 0}
 	h1{font-size:24px}
-	.subtitle{font-size:13px}
 	.topbar{position:static;justify-content:center;margin-bottom:16px}
 	.main-card{padding:18px 14px;border-radius:20px}
 	.btn{min-width:100%;margin-bottom:6px;padding:12px 16px;font-size:14px}
@@ -2999,7 +2997,6 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 	<div class="wrap">
 		<div class="header">
 			<h1>ZQ-VTPanel</h1>
-			<div class="subtitle">安全、快速、稳定的代理服务</div>
 		</div>
 		<div class="topbar">
 			<a href="https://github.com/BAYUEQI/ZQ-VTPanel" target="_blank" rel="nofollow noopener" aria-label="GitHub 项目">
