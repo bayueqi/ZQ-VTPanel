@@ -2943,8 +2943,11 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .sub-note{font-size:14px;font-weight:400;color:var(--muted);margin:0 0 8px;line-height:1.5}
 .sub-note .note-label{font-weight:600;color:var(--text)}
 .sub-hint{font-size:12px;font-weight:400;color:var(--muted)}
-.gt-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none;flex:none}
-.gt-tip{font-weight:400;color:var(--muted)}
+.gt-switch{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none;flex:none}
+.panel-in{animation:panelIn .22s ease}
+.panel-out{animation:panelOut .18s ease forwards}
+@keyframes panelIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+@keyframes panelOut{to{opacity:0;transform:translateY(-4px)}}
 .gt-switch input{display:none}
 .gt-slider{width:34px;height:18px;border-radius:999px;background:#cbd5e1;position:relative;transition:.25s}
 .gt-slider::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:.25s}
@@ -2985,7 +2988,6 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 	.input-group,.list-item{gap:6px}
 	.input-group input,.list-item input{min-width:0}
 	.input-group .btn,.list-item .btn{padding:10px 12px;font-size:12px;margin-bottom:0}
-	.gt-tip{display:none}
 	.link-arrow{width:28px;height:28px;margin-left:4px}
 	.sub-block .collapse-content.active{padding:14px 12px}
 	.qr-content{padding:24px 18px}
@@ -3099,7 +3101,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						</div></div>
 					</div>
 					<div class="sub-block">
-						<div class="collapse-header sub-head active" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理<span class="gt-tip">开：只走其它代理；关：优先直连，失败后回退其它代理</span></label><span class="icon">▼</span></span></div>
+						<div class="collapse-header sub-head active" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理</label><span class="icon">▼</span></span></div>
 						<div class="collapse-content active" id="node-exit"><div class="cc-inner">
 							<div class="form-group">
 								<div class="sub-note"><span class="note-label">入口地址</span> 可填优选IP或域名，留空用本项目域名；入口地址 × 代理，各出一组节点</div>
@@ -3366,14 +3368,22 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 
 					document.getElementById('reloadBtn').addEventListener('click', loadConfig);
 
-					document.getElementById('toggleBestIpSettings').addEventListener('click', function () {
-						var s = document.getElementById('bestIpSettings');
-						s.style.display = s.style.display === 'none' ? 'block' : 'none';
-					});
-					document.getElementById('toggleEchSettings').addEventListener('click', function () {
-						var s = document.getElementById('echSettings');
-						s.style.display = s.style.display === 'none' ? 'block' : 'none';
-					});
+					// 高级面板出现/消失动画；显隐后同步外层高度，避免被 max-height 裁掉
+					function togglePanel(id) {
+						var s = document.getElementById(id);
+						if (s.style.display === 'none') {
+							s.style.display = 'block';
+							s.classList.remove('panel-out');
+							s.classList.add('panel-in');
+							setTimeout(syncHeights, 50);
+						} else {
+							s.classList.remove('panel-in');
+							s.classList.add('panel-out');
+							setTimeout(function () { s.style.display = 'none'; s.classList.remove('panel-out'); syncHeights(); }, 180);
+						}
+					}
+					document.getElementById('toggleBestIpSettings').addEventListener('click', function () { togglePanel('bestIpSettings'); });
+					document.getElementById('toggleEchSettings').addEventListener('click', function () { togglePanel('echSettings'); });
 
 					document.getElementById('fetchBestIp').addEventListener('click', async function () {
 						var btn = this;
