@@ -2471,14 +2471,22 @@ export default {
                     throw new Error(`API请求失败: ${response.status}`);
                 }
                 const text = await response.text();
+                const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+                const ipv6Regex = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^::1$|^::$|^(?:[0-9a-fA-F]{1,4}:){1,7}:$|^(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}$|^(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}$|^(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}$|^[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}$|^:(?::[0-9a-fA-F]{1,4}){1,7}$/;
                 const ips = text
                     .split(/[\n\r,]+/)
-                    .map((ip) => ip.trim())
-                    .filter((ip) => {
-                        const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-                        const ipv6Regex = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^::1$|^::$|^(?:[0-9a-fA-F]{1,4}:){1,7}:$|^(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}$|^(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}$|^(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}$|^[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}$|^:(?::[0-9a-fA-F]{1,4}){1,7}$/;
-                        return ipv4Regex.test(ip) || ipv6Regex.test(ip);
-                    });
+                    .map((item) => item.trim())
+                    .filter(Boolean)
+                    .map((item) => {
+                        const [rawIp, ...rest] = item.split('#');
+                        let ip = rawIp.trim();
+                        const b = ip.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
+                        if (b) ip = b[1];
+                        else ip = ip.replace(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/, '$1');
+                        const remark = rest.join('#').trim();
+                        return { ip, remark: '优选' + remark };
+                    })
+                    .filter((item) => ipv4Regex.test(item.ip) || ipv6Regex.test(item.ip));
                 return json({ success: true, ips: ips });
             } catch (error) {
                 return json({ success: false, error: error.message }, 500);
@@ -3402,7 +3410,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 							if (result.success && result.ips && result.ips.length) {
 								var existing = {}; state.domains.forEach(function (d) { existing[d.first] = 1; });
 								var added = 0;
-								result.ips.forEach(function (ip) { if (!existing[ip]) { state.domains.push({ first: ip, second: '优选IP' }); existing[ip] = 1; added++; } });
+								result.ips.forEach(function (item) { if (!existing[item.ip]) { state.domains.push({ first: item.ip, second: item.remark || '优选' }); existing[item.ip] = 1; added++; } });
 								renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
 								showMessage('成功添加 ' + added + ' 个优选IP', 'success');
 							} else { showMessage('未获取到优选IP', 'error'); }
@@ -3453,20 +3461,29 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
                 }
 
                 const text = await response.text();
-                const newIps = text.replace(/[ \t\r\n]+/g, ',').replace(/,+/g, ',').replace(/^,|,$/g, '').split(',').filter(Boolean);
+                const newItems = text.replace(/[ \t\r\n]+/g, ',').replace(/,+/g, ',').replace(/^,|,$/g, '').split(',').filter(Boolean);
                 const ipv4Regex = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
                 const ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9]))$/;
 
-                const ips = newIps.filter(ip => ipv4Regex.test(ip) || ipv6Regex.test(ip));
+                const ips = newItems
+                    .map(item => {
+                        const [rawIp, ...rest] = item.split('#');
+                        let ip = rawIp.trim();
+                        const b = ip.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
+                        if (b) ip = b[1];
+                        else ip = ip.replace(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/, '$1');
+                        return { ip, remark: rest.join('#').trim() };
+                    })
+                    .filter(item => ipv4Regex.test(item.ip) || ipv6Regex.test(item.ip));
 
                 if (ips.length > 0) {
                     let domains = normalizeDomains(cfg.domains);
 
                     const existingIps = new Set(domains.map(d => d.ip));
-                    const nonPreferredIps = domains.filter(d => d.remark !== '优选IP');
+                    const nonPreferredIps = domains.filter(d => !(d.remark || '').startsWith('优选'));
                     const preferredIps = ips
-                        .filter(ip => !existingIps.has(ip))
-                        .map(ip => ({ ip, remark: '优选IP' }));
+                        .filter(item => !existingIps.has(item.ip))
+                        .map(item => ({ ip: item.ip, remark: '优选' + item.remark }));
 
                     domains = [...nonPreferredIps, ...preferredIps];
 
