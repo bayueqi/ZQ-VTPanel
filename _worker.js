@@ -82,6 +82,8 @@ const getParam=(key)=>paramsMap[key][Math.floor(Math.random()*paramsMap[key].len
 // ----------- 共享常量和工具 -----------
 const DEFAULT_UUID = "ef9d104e-ca0e-4202-ba4b-a0afb969c747";
 const DEFAULT_BEST_IP_API = "https://ipdb.api.030101.xyz/?type=bestcf";
+const DEFAULT_PROXY_API = "https://texturl.520jk.cc.cd/csp";
+const SUPPORTED_PROXY_PROTOCOLS = ["socks5", "http", "https", "sstp"];
 const DEFAULT_ECH_SNI = "cloudflare-ech.com";
 const DEFAULT_ECH_DNS = "https://sm2.doh.pub/dns-query";
 // 订阅转换服务（Sublink Worker）。可用环境变量 SUBLINK_BASE 覆盖，换成你自己部署的 Sublink。
@@ -107,6 +109,8 @@ const DEFAULT_CONFIG = {
     fallbackTimeout: 100,
     subLinkBase: DEFAULT_SUBLINK_BASE,
     bestIpApi: DEFAULT_BEST_IP_API, autoUpdateBestIp: false,
+    proxyApi: DEFAULT_PROXY_API, autoUpdateProxies: false,
+    proxyProtocols: SUPPORTED_PROXY_PROTOCOLS,
     protocols: ["vless", "trojan"],
     ech: false, echConfig: { sni: DEFAULT_ECH_SNI, dns: DEFAULT_ECH_DNS },
 };
@@ -119,6 +123,45 @@ function normalizeDomains(arr) {
             ? { ip: x.trim(), remark: "" }
             : (x && { ip: String(x.ip || "").trim(), remark: String(x.remark || "").trim() });
         if (item && item.ip && !seen.has(item.ip)) { seen.add(item.ip); out.push(item); }
+    }
+    return out;
+}
+
+// 解析其它代理订阅文本：每行 protocol://[user:pass@]host:port#备注，仅保留所选协议类型的节点
+function parseProxyApiList(text, protocols) {
+    const allow = new Set((Array.isArray(protocols) && protocols.length) ? protocols : SUPPORTED_PROXY_PROTOCOLS);
+    const seen = new Set(), out = [];
+    for (let line of String(text || "").split(/\r?\n/)) {
+        line = line.trim();
+        if (!line) continue;
+        const hashIdx = line.indexOf("#");
+        const proxy = (hashIdx === -1 ? line : line.slice(0, hashIdx)).trim();
+        const remark = (hashIdx === -1 ? "" : line.slice(hashIdx + 1)).trim();
+        const proto = ((proxy.match(/^([a-z0-9]+):\/\//i) || [])[1] || "").toLowerCase();
+        const key = proto === "socks" ? "socks5" : proto;
+        if (!key || !allow.has(key) || seen.has(proxy)) continue;
+        seen.add(proxy);
+        out.push({ proxy, remark });
+    }
+    return out;
+}
+
+// 解析优选IP订阅文本：支持 ip / ip:端口 / [ipv6]:端口，可带 #备注
+function parseBestIpList(text) {
+    const ipv4 = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+    const ipv6 = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9]))$/;
+    const seen = new Set(), out = [];
+    for (let raw of String(text || "").split(/[\s,]+/)) {
+        raw = raw.trim();
+        if (!raw) continue;
+        const [rawIp, ...rest] = raw.split("#");
+        let ip = rawIp.trim();
+        const b = ip.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
+        if (b) ip = b[1];
+        else ip = ip.replace(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/, "$1");
+        if ((!ipv4.test(ip) && !ipv6.test(ip)) || seen.has(ip)) continue;
+        seen.add(ip);
+        out.push({ ip, remark: rest.join("#").trim() });
     }
     return out;
 }
@@ -332,6 +375,9 @@ async function getUserConfig(env) {
         m.bestIpApi = m.bestIpApi || DEFAULT_BEST_IP_API;
         m.subLinkBase = normalizeSubLinkBase(m.subLinkBase) || fallback.subLinkBase;
         m.autoUpdateBestIp = !!m.autoUpdateBestIp;
+        m.proxyApi = (typeof m.proxyApi === "string" && m.proxyApi.trim()) || DEFAULT_PROXY_API;
+        m.autoUpdateProxies = !!m.autoUpdateProxies;
+        m.proxyProtocols = (Array.isArray(m.proxyProtocols) && m.proxyProtocols.length) ? m.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS;
         if (!Array.isArray(m.protocols) || !m.protocols.length) m.protocols = ["vless", "trojan"];
         m.ech = !!m.ech;
         if (!m.echConfig || typeof m.echConfig !== "object" || Array.isArray(m.echConfig)) m.echConfig = {};
@@ -2471,23 +2517,41 @@ export default {
                     throw new Error(`API请求失败: ${response.status}`);
                 }
                 const text = await response.text();
-                const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-                const ipv6Regex = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^::1$|^::$|^(?:[0-9a-fA-F]{1,4}:){1,7}:$|^(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}$|^(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}$|^(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}$|^[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}$|^:(?::[0-9a-fA-F]{1,4}){1,7}$/;
-                const ips = text
-                    .split(/[\n\r,]+/)
-                    .map((item) => item.trim())
-                    .filter(Boolean)
-                    .map((item) => {
-                        const [rawIp, ...rest] = item.split('#');
-                        let ip = rawIp.trim();
-                        const b = ip.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
-                        if (b) ip = b[1];
-                        else ip = ip.replace(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/, '$1');
-                        const remark = rest.join('#').trim();
-                        return { ip, remark: '优选' + remark };
-                    })
-                    .filter((item) => ipv4Regex.test(item.ip) || ipv6Regex.test(item.ip));
+                const ips = parseBestIpList(text).map((item) => ({ ip: item.ip, remark: "优选" + item.remark }));
                 return json({ success: true, ips: ips });
+            } catch (error) {
+                return json({ success: false, error: error.message }, 500);
+            }
+        }
+
+        if (url.pathname === "/api/fetch-proxies") {
+            const userConfig = await getUserConfig(env);
+            let apiUrl = userConfig.proxyApi || "";
+            let protocols = userConfig.proxyProtocols || SUPPORTED_PROXY_PROTOCOLS;
+            let bodyUUID = null;
+            try {
+                const body = await req.json();
+                if (body.apiUrl) apiUrl = body.apiUrl;
+                if (Array.isArray(body.protocols) && body.protocols.length) protocols = body.protocols;
+                bodyUUID = body.uuid || null;
+            } catch {}
+            if (!apiUrl) return json({ error: "未配置其它代理 API 地址" }, 400);
+            const validUUID = bodyUUID || getSessionUUID(req);
+            if (!validUUID) return json({ error: "请先登录" }, 401);
+            if (validUUID !== userConfig.uuid) return json({ error: "UUID错误，无权访问" }, 403);
+            try {
+                const response = await fetch(apiUrl, {
+                    headers: {
+                        "Accept": "text/plain,text/html,application/xhtml+xml,application/xml;",
+                        "User-Agent": "cmliu/CF-Workers-DD2D",
+                    },
+                });
+                if (!response.ok) {
+                    throw new Error(`API请求失败: ${response.status}`);
+                }
+                const text = await response.text();
+                const proxies = parseProxyApiList(text, protocols).map((p) => ({ proxy: p.proxy, remark: "优选" + p.remark }));
+                return json({ success: true, proxies });
             } catch (error) {
                 return json({ success: false, error: error.message }, 500);
             }
@@ -2545,6 +2609,9 @@ export default {
                         subLinkBase: normalizeSubLinkBase(incoming.subLinkBase) || DEFAULT_SUBLINK_BASE,
                         bestIpApi: incoming.bestIpApi || DEFAULT_BEST_IP_API,
                         autoUpdateBestIp: !!incoming.autoUpdateBestIp,
+                        proxyApi: typeof incoming.proxyApi === "string" ? incoming.proxyApi.trim() : "",
+                        autoUpdateProxies: !!incoming.autoUpdateProxies,
+                        proxyProtocols: (Array.isArray(incoming.proxyProtocols) && incoming.proxyProtocols.length) ? incoming.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS,
                         protocols: Array.isArray(incoming.protocols) && incoming.protocols.length > 0
                             ? incoming.protocols
                             : ["vless", "trojan"],
@@ -3110,8 +3177,29 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 								</div>
 							</div>
 							<div class="form-group">
-								<label>其它代理</label>
-								<div id="proxies" class="list"></div>
+									<div class="label-with-link">
+										<label style="margin:0">其它代理</label>
+											<a href="https://github.com/bayueqi/ZQ-CSP" target="_blank" rel="nofollow noopener" class="link-arrow" title="其它代理仓库"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M3.5 9.5L9.5 3.5M9.5 3.5H5M9.5 3.5V8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+											<button type="button" id="toggleProxyApiSettings" style="margin-left:8px;padding:6px 12px;min-width:auto;flex:none;background:#DAE9FE;color:#2563eb;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer">自动优选</button>
+									</div>
+									<div id="proxyApiSettings" style="display:none;margin:12px 0;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #bfdbfe">
+										<div style="margin-bottom:8px">
+											<label style="font-size:13px;font-weight:600;color:#64748b">其它代理 API地址</label>
+											<input type="text" id="proxyApi" placeholder="${DEFAULT_PROXY_API}" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid #bfdbfe;border-radius:6px;font-size:13px">
+										</div>
+										<label style="display:flex;align-items:center;font-size:13px;font-weight:600;color:#64748b;margin-bottom:8px"><input type="checkbox" id="autoUpdateProxies" style="margin-right:8px">自动获取其它代理</label>
+											<div style="margin-bottom:8px">
+												<label style="font-size:13px;font-weight:600;color:#64748b">协议类型</label>
+												<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px">
+													<label style="display:flex;align-items:center;font-size:13px;color:#64748b;margin:0"><input type="checkbox" class="proxy-protocol" value="socks5" style="margin-right:4px">socks5</label>
+													<label style="display:flex;align-items:center;font-size:13px;color:#64748b;margin:0"><input type="checkbox" class="proxy-protocol" value="http" style="margin-right:4px">http</label>
+													<label style="display:flex;align-items:center;font-size:13px;color:#64748b;margin:0"><input type="checkbox" class="proxy-protocol" value="https" style="margin-right:4px">https</label>
+													<label style="display:flex;align-items:center;font-size:13px;color:#64748b;margin:0"><input type="checkbox" class="proxy-protocol" value="sstp" style="margin-right:4px">sstp</label>
+												</div>
+											</div>
+											<button type="button" id="fetchProxies" class="btn btn-success" style="width:100%;min-width:auto;padding:10px 16px;font-size:13px">获取其它代理</button>
+									</div>
+									<div id="proxies" class="list"></div>
 								<div class="input-group">
 									<input type="text" id="proxyNew" placeholder="格式 [协议://]user:pass@host:port">
 									<input type="text" id="proxyRemarkNew" placeholder="输入备注">
@@ -3283,6 +3371,10 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						document.getElementById('echDns').value = echCfg.dns || '';
 						document.getElementById('autoUpdateBestIp').checked = !!cfg.autoUpdateBestIp;
 						document.getElementById('globalProxy').checked = !!cfg.globalProxy;
+						document.getElementById('proxyApi').value = cfg.proxyApi || '${DEFAULT_PROXY_API}';
+						document.getElementById('autoUpdateProxies').checked = !!cfg.autoUpdateProxies;
+						var selectedProtos = (Array.isArray(cfg.proxyProtocols) && cfg.proxyProtocols.length) ? cfg.proxyProtocols : ['socks5', 'http', 'https', 'sstp'];
+						document.querySelectorAll('.proxy-protocol').forEach(function (cb) { cb.checked = selectedProtos.indexOf(cb.value) >= 0; });
 
 						var protos = (Array.isArray(cfg.protocols) && cfg.protocols.length) ? cfg.protocols : ['vless', 'trojan'];
 						document.querySelectorAll('.proto-pill').forEach(function (p) {
@@ -3328,6 +3420,9 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						bestIpApi: document.getElementById('bestIpApi').value.trim() || 'https://ipdb.api.030101.xyz/?type=bestcf',
 						subLinkBase: subLinkBase,
 						autoUpdateBestIp: document.getElementById('autoUpdateBestIp').checked,
+						proxyApi: document.getElementById('proxyApi').value.trim(),
+						autoUpdateProxies: document.getElementById('autoUpdateProxies').checked,
+						proxyProtocols: Array.from(document.querySelectorAll('.proxy-protocol:checked')).map(function (cb) { return cb.value; }),
 						protocols: protocols,
 						ech: document.getElementById('echEnabled').checked,
 						echConfig: { sni: document.getElementById('echSni').value.trim(), dns: document.getElementById('echDns').value.trim() }
@@ -3396,6 +3491,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 					}
 					document.getElementById('toggleBestIpSettings').addEventListener('click', function () { togglePanel('bestIpSettings'); });
 					document.getElementById('toggleEchSettings').addEventListener('click', function () { togglePanel('echSettings'); });
+					document.getElementById('toggleProxyApiSettings').addEventListener('click', function () { togglePanel('proxyApiSettings'); });
 
 					document.getElementById('fetchBestIp').addEventListener('click', async function () {
 						var btn = this;
@@ -3417,6 +3513,27 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						} catch (e) { showMessage('获取优选IP失败: ' + e.message, 'error'); }
 						finally { btn.textContent = old; btn.disabled = false; }
 					});
+
+					document.getElementById('fetchProxies').addEventListener('click', async function () {
+						var btn = this;
+						var old = btn.textContent;
+						btn.textContent = '获取中...'; btn.disabled = true;
+						try {
+							var res = await fetch('/api/fetch-proxies', {
+								method: 'POST', headers: { 'Content-Type': 'application/json' },
+								body: JSON.stringify({ uuid: document.getElementById('uuid').value.trim() || '${userUUID}', apiUrl: document.getElementById('proxyApi').value.trim(), protocols: Array.from(document.querySelectorAll('.proxy-protocol:checked')).map(function (cb) { return cb.value; }) })
+							});
+							var result = await res.json();
+							if (result.success && result.proxies && result.proxies.length) {
+								var existing = {}; state.proxies.forEach(function (p) { existing[p.first] = 1; });
+								var added = 0;
+								result.proxies.forEach(function (item) { if (!existing[item.proxy]) { state.proxies.push({ first: item.proxy, second: item.remark || '优选' }); existing[item.proxy] = 1; added++; } });
+								renderPairList(document.getElementById('proxies'), state.proxies, '格式 [协议://]user:pass@host:port', '输入备注');
+								showMessage('成功添加 ' + added + ' 个其它代理', 'success');
+							} else { showMessage((result.error || '未获取到其它代理'), 'error'); }
+						} catch (e) { showMessage('获取其它代理失败: ' + e.message, 'error'); }
+						finally { btn.textContent = old; btn.disabled = false; }
+					});
 				});
 
 				document.getElementById('configForm').addEventListener('submit', function (e) { e.preventDefault(); saveConfigForm(); });
@@ -3435,95 +3552,122 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
         return new Response("Not Found", { status: 404 });
     },
     async scheduled(event, env, ctx) {
-        try {
-            const cfg = await getUserConfig(env);
-            if (!cfg.autoUpdateBestIp || !cfg.bestIpApi) {
-                console.log("Auto update best IP is disabled or no API configured");
-                return;
-            }
+        const cfg = await getUserConfig(env);
+        let domains = null;
+        let proxies = null;
 
-            console.log("Starting scheduled best IP update");
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 5000);
-
+        // 1) 自动获取优选IP（覆盖备注以「优选」开头的旧拉取结果，保留手动填写）
+        if (cfg.autoUpdateBestIp && cfg.bestIpApi) {
             try {
-                const response = await fetch(cfg.bestIpApi, {
-                    method: 'get',
-                    headers: {
-                        "Accept": "text/html,application/xhtml+xml,application/xml;",
-                        "User-Agent": "cmliu/CF-Workers-DD2D",
-                    },
-                    signal: controller.signal,
-                });
-
-                if (!response.ok) {
-                    throw new Error(`API request failed: ${response.status}`);
-                }
-
-                const text = await response.text();
-                const newItems = text.replace(/[ \t\r\n]+/g, ',').replace(/,+/g, ',').replace(/^,|,$/g, '').split(',').filter(Boolean);
-                const ipv4Regex = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-                const ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9]))$/;
-
-                const ips = newItems
-                    .map(item => {
-                        const [rawIp, ...rest] = item.split('#');
-                        let ip = rawIp.trim();
-                        const b = ip.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
-                        if (b) ip = b[1];
-                        else ip = ip.replace(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/, '$1');
-                        return { ip, remark: rest.join('#').trim() };
-                    })
-                    .filter(item => ipv4Regex.test(item.ip) || ipv6Regex.test(item.ip));
-
-                if (ips.length > 0) {
-                    let domains = normalizeDomains(cfg.domains);
-
-                    const existingIps = new Set(domains.map(d => d.ip));
-                    const nonPreferredIps = domains.filter(d => !(d.remark || '').startsWith('优选'));
-                    const preferredIps = ips
-                        .filter(item => !existingIps.has(item.ip))
-                        .map(item => ({ ip: item.ip, remark: '优选' + item.remark }));
-
-                    domains = [...nonPreferredIps, ...preferredIps];
-
-                    if (domains.length > 20) {
-                        domains = domains.slice(0, 20);
-                    }
-
-                    const normalized = {
-                        uuid: cfg.uuid,
-                        domains: domains,
-                        proxyIps: cfg.proxyIps || [],
-                        entries: cfg.entries || [],
-                        proxies: cfg.proxies || [],
-                        globalProxy: !!cfg.globalProxy,
-                        fallbackTimeout: cfg.fallbackTimeout || 100,
-                        // 注意：这里会整份回写配置，前端新增的字段必须一并带上，否则会被定时任务抹掉
-                        subLinkBase: normalizeSubLinkBase(cfg.subLinkBase) || DEFAULT_SUBLINK_BASE,
-                        bestIpApi: cfg.bestIpApi,
-                        autoUpdateBestIp: cfg.autoUpdateBestIp,
-                        protocols: cfg.protocols && cfg.protocols.length > 0 ? cfg.protocols : ["vless", "trojan"],
-                        ech: !!cfg.ech,
-                        echConfig: {
-                            sni: cfg.echConfig?.sni || DEFAULT_ECH_SNI,
-                            dns: cfg.echConfig?.dns || DEFAULT_ECH_DNS,
+                console.log("Starting scheduled best IP update");
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 5000);
+                try {
+                    const response = await fetch(cfg.bestIpApi, {
+                        method: 'get',
+                        headers: {
+                            "Accept": "text/html,application/xhtml+xml,application/xml;",
+                            "User-Agent": "cmliu/CF-Workers-DD2D",
                         },
-                    };
+                        signal: controller.signal,
+                    });
 
-                    if (env.VTPanel) {
-                        await env.VTPanel.put("user_config", JSON.stringify(normalized));
+                    if (!response.ok) {
+                        throw new Error(`API request failed: ${response.status}`);
                     }
 
-                    console.log(`Successfully updated ${preferredIps.length} best IPs`);
-                } else {
-                    console.log("No valid IPs received from API");
+                    const text = await response.text();
+                    const ips = parseBestIpList(text);
+
+                    if (ips.length > 0) {
+                        const current = normalizeDomains(cfg.domains);
+                        const existingIps = new Set(current.map(d => d.ip));
+                        const manual = current.filter(d => !(d.remark || '').startsWith('优选'));
+                        const preferred = ips
+                            .filter(item => !existingIps.has(item.ip))
+                            .map(item => ({ ip: item.ip, remark: '优选' + item.remark }));
+                        domains = [...manual, ...preferred];
+                        if (domains.length > 20) domains = domains.slice(0, 20);
+                        console.log(`Successfully updated ${preferred.length} best IPs`);
+                    } else {
+                        console.log("No valid IPs received from API");
+                    }
+                } finally {
+                    clearTimeout(timeout);
                 }
-            } finally {
-                clearTimeout(timeout);
+            } catch (error) {
+                console.error("Error in scheduled best IP update:", error);
             }
-        } catch (error) {
-            console.error("Error in scheduled best IP update:", error);
+        }
+
+        // 2) 自动获取其它代理（只保留带协议的节点，覆盖备注以「优选」开头的旧拉取结果，保留手动填写）
+        if (cfg.autoUpdateProxies && cfg.proxyApi) {
+            try {
+                console.log("Starting scheduled proxy update");
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 5000);
+                try {
+                    const response = await fetch(cfg.proxyApi, {
+                        method: 'get',
+                        headers: {
+                            "Accept": "text/plain,text/html,application/xhtml+xml,application/xml;",
+                            "User-Agent": "cmliu/CF-Workers-DD2D",
+                        },
+                        signal: controller.signal,
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`API request failed: ${response.status}`);
+                    }
+
+                    const text = await response.text();
+                    const fresh = parseProxyApiList(text, cfg.proxyProtocols);
+                    if (fresh.length > 0) {
+                        const current = cfg.proxies || [];
+                        const existingKeys = new Set(current.map(p => p.proxy));
+                        const manual = current.filter(p => !(p.remark || '').startsWith('优选'));
+                        const auto = fresh
+                            .filter(p => !existingKeys.has(p.proxy))
+                            .map(p => ({ proxy: p.proxy, remark: '优选' + p.remark }));
+                        proxies = [...manual, ...auto];
+                        console.log(`Successfully updated ${auto.length} proxies`);
+                    } else {
+                        console.log("No valid proxies received from API");
+                    }
+                } finally {
+                    clearTimeout(timeout);
+                }
+            } catch (error) {
+                console.error("Error in scheduled proxy update:", error);
+            }
+        }
+
+        // 3) 有更新时整份回写（带全所有字段，避免抹掉其它配置）
+        if (domains || proxies) {
+            const normalized = {
+                uuid: cfg.uuid,
+                domains: domains || normalizeDomains(cfg.domains),
+                proxyIps: cfg.proxyIps || [],
+                entries: cfg.entries || [],
+                proxies: proxies || (cfg.proxies || []),
+                globalProxy: !!cfg.globalProxy,
+                fallbackTimeout: cfg.fallbackTimeout || 100,
+                subLinkBase: normalizeSubLinkBase(cfg.subLinkBase) || DEFAULT_SUBLINK_BASE,
+                bestIpApi: cfg.bestIpApi,
+                autoUpdateBestIp: cfg.autoUpdateBestIp,
+                proxyApi: cfg.proxyApi || "",
+                autoUpdateProxies: !!cfg.autoUpdateProxies,
+                proxyProtocols: (cfg.proxyProtocols && cfg.proxyProtocols.length) ? cfg.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS,
+                protocols: cfg.protocols && cfg.protocols.length > 0 ? cfg.protocols : ["vless", "trojan"],
+                ech: !!cfg.ech,
+                echConfig: {
+                    sni: cfg.echConfig?.sni || DEFAULT_ECH_SNI,
+                    dns: cfg.echConfig?.dns || DEFAULT_ECH_DNS,
+                },
+            };
+            if (env.VTPanel) {
+                await env.VTPanel.put("user_config", JSON.stringify(normalized));
+            }
         }
     },
 };
