@@ -560,6 +560,7 @@ async function httpConnect(proxyConfig,targetHost,targetPort,useTLS=false){
             ?`Proxy-Authorization: Basic ${btoa(proxyConfig.username+":"+proxyConfig.password)}\r\n`
             :"";
         const target=`${stripIPv6Brackets(targetHost)}:${targetPort}`;
+        if(auth) console.log(`[proxy-auth] attempt user=${proxyConfig.username} proxy=${serverHost}:${proxyConfig.port} target=${target} ts=${new Date().toISOString()}`);
         const request=`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n${auth}User-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n`;
         await writer.write(textEncoder.encode(request));
         writer.releaseLock();
@@ -576,7 +577,11 @@ async function httpConnect(proxyConfig,targetHost,targetPort,useTLS=false){
         if(headEnd===-1) throw new Error("Proxy CONNECT response header too long or invalid");
         const statusMatch=textDecoder.decode(head.slice(0,headEnd)).split("\r\n")[0].match(/HTTP\/\d\.\d\s+(\d+)/);
         const statusCode=statusMatch?parseInt(statusMatch[1],10):NaN;
-        if(!Number.isFinite(statusCode)||statusCode<200||statusCode>=300) throw new Error("Proxy refused connection: HTTP "+statusCode);
+        if(!Number.isFinite(statusCode)||statusCode<200||statusCode>=300){
+            if(auth) console.log(`[proxy-auth] failed user=${proxyConfig.username} proxy=${serverHost}:${proxyConfig.port} status=${statusCode} ts=${new Date().toISOString()}`);
+            throw new Error("Proxy refused connection: HTTP "+statusCode);
+        }
+        if(auth) console.log(`[proxy-auth] success user=${proxyConfig.username} proxy=${serverHost}:${proxyConfig.port} ts=${new Date().toISOString()}`);
         reader.releaseLock();
 
         if(readBytes>headEnd){
