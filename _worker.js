@@ -568,7 +568,7 @@ async function httpConnect(proxyConfig,targetHost,targetPort,useTLS=false){
         while(headEnd===-1&&readBytes<8192){
             const {done,value}=await reader.read();
             if(done||!value) throw new Error((useTLS?"HTTPS":"HTTP")+" proxy closed before CONNECT response");
-            head=new Uint8Array([...head,...value]);
+            head=concatBytes(head,value);
             readBytes=head.length;
             const index=head.findIndex((_,i)=>i<head.length-3&&head[i]===0x0d&&head[i+1]===0x0a&&head[i+2]===0x0d&&head[i+3]===0x0a);
             if(index!==-1) headEnd=index+4;
@@ -2158,7 +2158,7 @@ export default {
                 }
                 const curr = new Uint8Array(chunk);
                 const input = trojanUDPCtx.cache.byteLength
-                    ? new Uint8Array([...trojanUDPCtx.cache, ...curr])
+                    ? concatBytes(trojanUDPCtx.cache, curr)
                     : curr;
 
                 let cursor = 0;
@@ -2212,7 +2212,7 @@ export default {
                         transform(c, ctrl) {
                             const cr = new Uint8Array(c);
                             const ir = rc.cache.byteLength
-                                ? new Uint8Array([...rc.cache, ...cr])
+                                ? concatBytes(rc.cache, cr)
                                 : cr;
 
                             let rcursor = 0;
