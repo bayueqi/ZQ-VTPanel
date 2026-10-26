@@ -101,6 +101,7 @@ function normalizeSubLinkBase(v) {
 }
 const DEFAULT_CONFIG = {
     uuid: DEFAULT_UUID,
+    password: "admin",        // 面板访问密码，默认 admin
     domains: [],               // 优选IP：[{ip, remark}]
     proxyIps: [],              // ProxyIP：[host 或 host:port]
     entries: [],               // 入口地址：[优选IP 或域名]，空 = 本项目域名
@@ -147,9 +148,10 @@ function parseProxyApiList(text, protocols) {
 }
 
 // 解析优选IP订阅文本：支持 ip / ip:端口 / [ipv6]:端口，可带 #备注（备注可含空格，如 1.2.3.4:443#CF IP-中国香港-63ms）
+const IPV4_RE = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+const IPV6_RE = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9]))$/;
+const IPV4_PORT_RE = /^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/;
 function parseBestIpList(text) {
-    const ipv4 = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-    const ipv6 = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9]))$/;
     const seen = new Set(), out = [];
     const addOne = (raw) => {
         raw = String(raw || "").trim();
@@ -159,8 +161,8 @@ function parseBestIpList(text) {
         const remark = (hashIdx === -1 ? "" : raw.slice(hashIdx + 1)).trim();
         const b = ip.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
         if (b) ip = b[1];
-        else ip = ip.replace(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/, "$1");
-        if ((!ipv4.test(ip) && !ipv6.test(ip)) || seen.has(ip)) return;
+        else ip = ip.replace(IPV4_PORT_RE, "$1");
+        if ((!IPV4_RE.test(ip) && !IPV6_RE.test(ip)) || seen.has(ip)) return;
         seen.add(ip);
         out.push({ ip, remark });
     };
@@ -341,7 +343,7 @@ function singboxEchHotPatch(singboxText, { uuid, echSni }) {
     }
 }
 const SESSION_COOKIE_RE = /(?:^|;\s*)session=([^;]+)/;
-const SESSION_COOKIE = (uuid) => `session=${uuid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`;
+const PANEL_AUTH_RE = /(?:^|;\s*)panel_auth=([^;]+)/;
 
 // 从 cookie 或 URL query 里取 session UUID，都没有返回 null
 function getSessionUUID(req, url) {
@@ -351,6 +353,73 @@ function getSessionUUID(req, url) {
     }
     const m = (req.headers.get("cookie") || "").match(SESSION_COOKIE_RE);
     return m ? m[1] : null;
+}
+
+// ===================== 面板登录态（PASSWORD） =====================
+// 面板访问权限改用 PASSWORD（环境变量或基础配置里保存的 password），
+// 与「节点/订阅用的 UUID」解耦：UUID 仍决定节点身份与订阅，密码只决定谁能打开面板。
+const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64url = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")
+    + "=".repeat((4 - s.length % 4) % 4)), (c) => c.charCodeAt(0));
+
+async function panelAuthMac(boot, body) {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(String(boot)),
+        { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+    return new Uint8Array(sig).slice(0, 16);
+}
+
+// 签发一个面板登录 token：body = 4 字节过期时间(秒) + 12 字节随机数，签名后 base64url
+async function makePanelToken(boot, expAt) {
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const body = new Uint8Array(16);
+    new DataView(body.buffer).setUint32(0, Math.ceil(expAt / 1000), false);
+    body.set(nonce, 4);
+    const mac = await panelAuthMac(boot, new TextDecoder().decode(body));
+    const token = new Uint8Array(16 + mac.length);
+    token.set(body); token.set(mac, 16);
+    return b64url(token);
+}
+
+async function verifyPanelToken(token, boot) {
+    if (typeof token !== "string" || !token) return false;
+    let raw;
+    try { raw = unb64url(token); } catch { return false; }
+    if (raw.byteLength !== 32) return false;
+    const body = raw.slice(0, 16);
+    const sig = raw.slice(16);
+    const exp = new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(0, false);
+    if (exp <= Math.floor(Date.now() / 1000)) return false;
+    const want = await panelAuthMac(boot, new TextDecoder().decode(body));
+    let diff = 0;
+    for (let i = 0; i < want.length; i++) diff |= sig[i] ^ want[i];
+    return diff === 0;
+}
+
+// 面板登录态是否有效：验 panel_auth 签名 token
+async function isPanelAuthed(req, url, cfg, env) {
+    const cookie = req.headers.get("cookie") || "";
+    const authToken = (cookie.match(PANEL_AUTH_RE) || [])[1];
+    if (authToken) {
+        const boot = getPanelBoot(env, cfg);
+        if (await verifyPanelToken(authToken, boot)) return true;
+    }
+    return false;
+}
+
+// 面板密码：优先基础配置里保存的 password，其次环境变量 PASSWORD，都没有则默认 admin
+function getPanelPassword(env, cfg) {
+    const saved = typeof cfg.password === "string" ? cfg.password.trim() : "";
+    if (saved) return saved;
+    const envPw = typeof env?.PASSWORD === "string" ? env.PASSWORD.trim() : "";
+    if (envPw) return envPw;
+    return "admin";
+}
+
+// 签名密钥：绑定当前生效密码，改密码后旧 token 自动失效
+function getPanelBoot(env, cfg) {
+    return getPanelPassword(env, cfg);
 }
 
 async function getUserConfig(env) {
@@ -394,6 +463,7 @@ async function getUserConfig(env) {
         let echDns = typeof m.echConfig.dns === "string" ? m.echConfig.dns.trim() : "";
         m.echConfig.sni = echSni || DEFAULT_ECH_SNI;
         m.echConfig.dns = echDns || DEFAULT_ECH_DNS;
+        m.password = (typeof m.password === "string" && m.password.trim()) || DEFAULT_CONFIG.password;
         // 旧 domain 单值并入 domains
         const d = (m.domain || "").trim();
         if (d && !m.domains.some((x) => x.ip === d)) m.domains.unshift({ ip: d, remark: "" });
@@ -2076,8 +2146,8 @@ export default {
         // 取 workerHost / 优选IP(domains) / 入口地址(entries)；入口地址为空时用本项目域名
         const getDomains = (request, cfg) => {
             const workerHost = new URL(request.url).hostname;
-            const domains = normalizeDomains(cfg.domains);
-            if (!domains.length) domains.push({ ip: workerHost, remark: "" });
+            // cfg.domains 在 getUserConfig 已归一化，此处仅兜底非数组
+            const domains = Array.isArray(cfg.domains) && cfg.domains.length ? cfg.domains : [{ ip: workerHost, remark: "" }];
             const entries = (cfg.entries || []).length ? cfg.entries : [workerHost];
             return { workerHost, domains, entries };
         };
@@ -2510,10 +2580,8 @@ export default {
                 if (body.apiUrl) apiUrl = body.apiUrl;
                 bodyUUID = body.uuid || null;
             } catch {}
-            // body.uuid 或 cookie session 任一有效即可
-            const validUUID = bodyUUID || getSessionUUID(req);
-            if (!validUUID) return json({ error: "请先登录" }, 401);
-            if (validUUID !== userConfig.uuid) return json({ error: "UUID错误，无权访问" }, 403);
+            // 面板身份校验用 panel_auth（或旧 session=uuid 兼容）
+            if (!(await isPanelAuthed(req, url, userConfig, env))) return json({ error: "请先登录" }, 401);
             
             try {
                 const response = await fetch(apiUrl, {
@@ -2545,9 +2613,7 @@ export default {
                 bodyUUID = body.uuid || null;
             } catch {}
             if (!apiUrl) return json({ error: "未配置其它代理 API 地址" }, 400);
-            const validUUID = bodyUUID || getSessionUUID(req);
-            if (!validUUID) return json({ error: "请先登录" }, 401);
-            if (validUUID !== userConfig.uuid) return json({ error: "UUID错误，无权访问" }, 403);
+            if (!(await isPanelAuthed(req, url, userConfig, env))) return json({ error: "请先登录" }, 401);
             try {
                 const response = await fetch(apiUrl, {
                     headers: {
@@ -2569,20 +2635,13 @@ export default {
         if (url.pathname === "/api/config") {
             const userConfig = await getUserConfig(env);
             if (req.method === "GET") {
-                const inputUUID = getSessionUUID(req, url);
-                if (!inputUUID) return json({ error: "请先登录" }, 401);
-                if (inputUUID !== userConfig.uuid) return json({ error: "UUID错误，无权访问" }, 403);
+                if (!(await isPanelAuthed(req, url, userConfig, env))) return json({ error: "请先登录" }, 401);
                 return json(userConfig);
             } else if (req.method === "POST") {
                 try {
                     const incoming = await req.json();
-                    // 身份校验用 session（Cookie / ?pwd=），不用 body.uuid：
-                    // body.uuid 是「要改成的新 UUID」，不是当前密码，
-                    // 否则永远只能填旧 UUID 才能通过，等于改不了。
-                    const sessionUUID = getSessionUUID(req, url);
-                    if (!sessionUUID) return json({ error: "请先登录" }, 401);
-                    if (sessionUUID !== userConfig.uuid)
-                        return json({ error: "UUID错误，无权访问" }, 403);
+                    // 面板身份校验用 panel_auth（或旧 session=uuid 兼容）
+                    if (!(await isPanelAuthed(req, url, userConfig, env))) return json({ error: "请先登录" }, 401);
                     const newUUID = typeof incoming.uuid === "string" ? incoming.uuid.trim() : "";
                     if (!newUUID) return json({ error: "UUID不能为空" }, 400);
                     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(newUUID))
@@ -2612,6 +2671,7 @@ export default {
                             : 100;
                     const normalized = {
                         uuid: newUUID,
+                        password: typeof incoming.password === "string" ? incoming.password.trim() : "",
                         domains, proxyIps, entries, proxies,
                         globalProxy: !!incoming.globalProxy,
                         fallbackTimeout,
@@ -2770,39 +2830,30 @@ export default {
 
         if (url.pathname === "/" || url.pathname === "/index.html") {
             const userConfig = await getUserConfig(env);
-            let pwd = url.searchParams.get("pwd");
+            const panelPw = getPanelPassword(env, userConfig);
             let isLoggedIn = false;
-            let cookieSetHeader = null;
             let errorMsg = "";
 
-            // 处理 POST 登录请求（支持浏览器保存密码）
+            // 处理 POST 登录请求（表单提交密码）
             if (req.method === "POST") {
+                let pwd = null;
                 try {
                     const formData = await req.formData();
                     pwd = formData.get("pwd");
                 } catch {}
-                if (pwd && pwd === userConfig.uuid) {
+                if (pwd && pwd === panelPw) {
+                    const token = await makePanelToken(getPanelBoot(env, userConfig), Date.now() + 86400 * 1000);
                     return new Response(null, {
                         status: 303,
                         headers: {
                             "Location": url.origin + url.pathname,
-                            "Set-Cookie": SESSION_COOKIE(pwd),
+                            "Set-Cookie": `panel_auth=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
                         },
                     });
-                } else {
-                    errorMsg = "UUID错误，请检查后重新输入";
                 }
-            } else if (pwd) {
-                // GET 方式带 pwd 参数（兼容旧方式）
-                if (pwd === userConfig.uuid) {
-                    isLoggedIn = true;
-                    cookieSetHeader = SESSION_COOKIE(pwd);
-                } else {
-                    errorMsg = "UUID错误，请检查后重新输入";
-                }
+                errorMsg = "密码错误，请检查后重新输入";
             } else {
-                const cookieUUID = getSessionUUID(req);
-                if (cookieUUID === userConfig.uuid) isLoggedIn = true;
+                isLoggedIn = await isPanelAuthed(req, url, userConfig, env);
             }
 
             if (!isLoggedIn) {
@@ -2918,8 +2969,8 @@ export default {
 		<h1>ZQ-VTPanel</h1>
 		<form method="post" action="/">
 			<div class="form-group">
-				<label for="pwd">请输入UUID</label>
-				<input type="password" id="pwd" name="pwd" required placeholder="请输入正确的UUID" autocomplete="current-password">
+				<label for="pwd">请输入密码</label>
+				<input type="password" id="pwd" name="pwd" required placeholder="默认密码 admin" autocomplete="current-password">
 			</div>
 			<button type="submit">进入节点界面</button>
 		</form>
@@ -3097,7 +3148,16 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 				<button type="button" class="collapse-header" data-collapse="basic-content"><span class="ch-title"><span class="ch-dot" style="background:#10b981"></span>基础配置</span><span class="icon">▼</span></button>
 				<div class="collapse-content" id="basic-content"><div class="cc-inner">
 					<div class="form-group">
-						<label for="uuid">UUID</label>
+						<label for="panelPassword">密码</label>
+						<input type="text" id="panelPassword" name="panelPassword" placeholder="默认 admin">
+					</div>
+					<div class="form-group">
+						<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+							<label for="uuid" style="margin:0">UUID</label>
+							<button type="button" id="regenUuid" title="重新生成 UUID" style="flex:none;min-width:auto;width:24px;height:24px;padding:0;display:flex;align-items:center;justify-content:center;background:#DAE9FE;color:#2563eb;border-radius:6px;border:none;cursor:pointer">
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+							</button>
+						</div>
 						<input type="text" id="uuid" name="uuid" required placeholder="标准格式 8-4-4-4-12 位十六进制，例 ef9d104e-ca0e-4202-ba4b-a0afb969c747">
 					</div>
 					<div class="form-group">
@@ -3363,6 +3423,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 				}
 
 				var originalUuid = '';
+				var originalPassword = '';
 
 				async function loadConfig() {
 					try {
@@ -3370,7 +3431,9 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						if (!res.ok) throw 0;
 						var cfg = await res.json();
 						originalUuid = cfg.uuid || '';
+						originalPassword = cfg.password || '';
 						document.getElementById('uuid').value = cfg.uuid || '';
+						document.getElementById('panelPassword').value = cfg.password || '';
 						document.getElementById('fallbackTimeout').value = cfg.fallbackTimeout || 100;
 						document.getElementById('bestIpApi').value = cfg.bestIpApi || 'https://ipdb.api.030101.xyz/?type=bestcf';
 						document.getElementById('subLinkBase').value = cfg.subLinkBase || '${DEFAULT_SUBLINK_BASE}';
@@ -3420,6 +3483,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 					if (!protocols.length) { showMessage('请至少选择一个协议类型', 'error'); return; }
 					var body = {
 						uuid: uuid,
+						password: document.getElementById('panelPassword').value.trim(),
 						domains: state.domains.filter(function (x) { return x.first; }).map(function (x) { return { ip: x.first, remark: x.second }; }),
 						proxyIps: state.proxyIps.filter(Boolean),
 						entries: state.entries.filter(Boolean),
@@ -3439,11 +3503,23 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 					var res = await fetch('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 					var result = await res.json();
 					if (res.ok) {
-						if (uuid === originalUuid) { showMessage('配置保存成功', 'success'); }
-						else {
-							showMessage('配置保存成功，请使用新 UUID 重新登录', 'success');
+						var newPassword = document.getElementById('panelPassword').value.trim();
+						var oldPassword = originalPassword || '';
+						var uuidChanged = uuid !== originalUuid;
+						var pwChanged = newPassword !== oldPassword;
+						originalUuid = uuid;
+						originalPassword = newPassword;
+						if (pwChanged) {
+							showMessage('配置保存成功，请使用新密码重新登录', 'success');
+							document.cookie = 'panel_auth=; Path=/; Max-Age=0; SameSite=Lax';
 							document.cookie = 'session=; Path=/; Max-Age=0; SameSite=Lax';
 							setTimeout(function () { window.location.href = '/'; }, 800);
+						} else if (uuidChanged) {
+							// UUID 变了但密码没变：清掉旧 session（订阅兼容），面板登录态保持
+							document.cookie = 'session=; Path=/; Max-Age=0; SameSite=Lax';
+							showMessage('配置保存成功，UUID 已更新', 'success');
+						} else {
+							showMessage('配置保存成功', 'success');
 						}
 					} else { showMessage((result.error || '配置保存失败'), 'error'); }
 				}
@@ -3483,6 +3559,11 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 					bindAdd('addProxy', 'proxyNew', 'proxyRemarkNew', 'proxy');
 
 					document.getElementById('reloadBtn').addEventListener('click', loadConfig);
+
+					// 点击刷新图标重新生成 UUID（只填入输入框，点保存才真正生效）
+					document.getElementById('regenUuid').addEventListener('click', function () {
+						document.getElementById('uuid').value = crypto.randomUUID();
+					});
 
 					// 高级面板出现/消失动画；显隐后同步外层高度，避免被 max-height 裁掉
 					function togglePanel(id) {
@@ -3554,9 +3635,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 </body>
 </html>
 `;
-            const panelHeaders = { "content-type": "text/html; charset=utf-8" };
-            if (cookieSetHeader) panelHeaders["set-cookie"] = cookieSetHeader;
-            return new Response(html, { headers: panelHeaders });
+            return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
         }
         return new Response("Not Found", { status: 404 });
     },
@@ -3655,6 +3734,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
         if (domains || proxies) {
             const normalized = {
                 uuid: cfg.uuid,
+                password: cfg.password || "",
                 domains: domains || normalizeDomains(cfg.domains),
                 proxyIps: cfg.proxyIps || [],
                 entries: cfg.entries || [],
