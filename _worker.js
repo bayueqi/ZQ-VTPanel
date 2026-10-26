@@ -146,22 +146,31 @@ function parseProxyApiList(text, protocols) {
     return out;
 }
 
-// 解析优选IP订阅文本：支持 ip / ip:端口 / [ipv6]:端口，可带 #备注
+// 解析优选IP订阅文本：支持 ip / ip:端口 / [ipv6]:端口，可带 #备注（备注可含空格，如 1.2.3.4:443#CF IP-中国香港-63ms）
 function parseBestIpList(text) {
     const ipv4 = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
     const ipv6 = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9]))$/;
     const seen = new Set(), out = [];
-    for (let raw of String(text || "").split(/[\s,]+/)) {
-        raw = raw.trim();
-        if (!raw) continue;
-        const [rawIp, ...rest] = raw.split("#");
-        let ip = rawIp.trim();
+    const addOne = (raw) => {
+        raw = String(raw || "").trim();
+        if (!raw) return;
+        const hashIdx = raw.indexOf("#");
+        let ip = (hashIdx === -1 ? raw : raw.slice(0, hashIdx)).trim();
+        const remark = (hashIdx === -1 ? "" : raw.slice(hashIdx + 1)).trim();
         const b = ip.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
         if (b) ip = b[1];
         else ip = ip.replace(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/, "$1");
-        if ((!ipv4.test(ip) && !ipv6.test(ip)) || seen.has(ip)) continue;
+        if ((!ipv4.test(ip) && !ipv6.test(ip)) || seen.has(ip)) return;
         seen.add(ip);
-        out.push({ ip, remark: rest.join("#").trim() });
+        out.push({ ip, remark });
+    };
+    for (const line of String(text || "").split(/\r?\n/)) {
+        const l = line.trim();
+        if (!l) continue;
+        // 整行形如 ip[:端口][#备注]：备注允许含空格，整行当一个条目
+        if (/^(?:[0-9a-fA-F:.]+|\[[0-9a-fA-F:.]+\])(?::\d{1,5})?(?:#.*)?$/.test(l)) { addOne(l); continue; }
+        // 同一行多个 IP：按空白/逗号切分
+        for (const token of l.split(/[\s,]+/)) addOne(token);
     }
     return out;
 }
