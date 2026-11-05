@@ -99,7 +99,7 @@ function normalizeServiceBase(v) {
     return /^https?:\/\/[^\s/]+/i.test(s) ? s : "";
 }
 // 订阅转换配置文件：subconverter 的 config= 参数，仅对 clash 生效
-const SUB_CONFIG_BASE = "https://raw.githubusercontent.com/bayueqi/ZQ-VTPanel/main/config/";
+const SUB_CONFIG_BASE = "https://raw.githubusercontent.com/bayueqi/ZQ-VTPanel/main/";
 const SUB_CONFIG_PRESETS = [
     ["", "不使用"],
     ["ZQ-AllInOne.ini", "全能版"],
