@@ -86,18 +86,82 @@ const DEFAULT_PROXY_API = "https://texturl.520jk.cc.cd/csp";
 const SUPPORTED_PROXY_PROTOCOLS = ["socks5", "http", "https", "sstp"];
 const DEFAULT_ECH_SNI = "cloudflare-ech.com";
 const DEFAULT_ECH_DNS = "https://sm2.doh.pub/dns-query";
-// 订阅转换服务（Sublink Worker）。可用环境变量 SUBLINK_BASE 覆盖，换成你自己部署的 Sublink。
-const DEFAULT_SUBLINK_BASE = "https://sublink.vpnjk.cc.cd";
-// Sublink 原生 API 是 /clash /singbox /surge /xray?config=...，
-// 并没有 subconverter 那种 /sub?target=... 接口，所以这里只做「目标 -> 端点」白名单映射。
-const SUBLINK_TARGET_ENDPOINTS = { clash: "clash", singbox: "singbox", surge: "surge" };
+// 订阅转换服务（subconverter 接口，ZQ-SubApi 就是这一层）。可用环境变量 SUBCONVERTER_BASE 覆盖。
+const DEFAULT_SUBCONVERTER_BASE = "https://subapi.vpnjk.cc.cd";
+// 客户端格式 -> subconverter 的 target 参数；未列出的（mixed / quanx / loon 等）直接返回 base64 节点列表
+const SUBCONVERTER_TARGETS = { clash: "clash", singbox: "singbox", surge: "surge" };
 // 订阅转换服务地址归一化：只接受 http(s):// 的服务根地址，去掉尾部斜杠。
 // 带 ? 或 # 说明用户贴的是完整订阅/转换链接而不是服务地址，一律判为非法并返回 ""（由调用方回退默认值）
-function normalizeSubLinkBase(v) {
+function normalizeServiceBase(v) {
     if (typeof v !== "string") return "";
     const s = v.trim().replace(/\/+$/, "");
     if (/[?#]/.test(s)) return "";
     return /^https?:\/\/[^\s/]+/i.test(s) ? s : "";
+}
+// 订阅转换配置文件（ACL4SSR 的 .ini 规则）：subconverter 通过 config 参数套用，空 = 不套规则。
+const ACL4SSR_CONFIG_BASE = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/";
+const ACL4SSR_CF_CONFIG_BASE = "https://raw.githubusercontent.com/cmliu/ACL4SSR/master/Clash/config/";
+const DEFAULT_SUB_CONFIG_LIST = [
+    { group: "", label: "不使用", url: "" },
+    { group: "ACL4SSR", label: "默认版 分组比较全", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online.ini" },
+    { group: "ACL4SSR", label: "更多去广告", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_AdblockPlus.ini" },
+    { group: "ACL4SSR", label: "多国分组", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_MultiCountry.ini" },
+    { group: "ACL4SSR", label: "无自动测速", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_NoAuto.ini" },
+    { group: "ACL4SSR", label: "无广告拦截规则", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_NoReject.ini" },
+    { group: "ACL4SSR", label: "精简版", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Mini.ini" },
+    { group: "ACL4SSR", label: "精简版 更多去广告", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Mini_AdblockPlus.ini" },
+    { group: "ACL4SSR", label: "精简版 不带自动测速", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Mini_NoAuto.ini" },
+    { group: "ACL4SSR", label: "精简版 带故障转移", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Mini_Fallback.ini" },
+    { group: "ACL4SSR", label: "精简版 自动测速、故障转移、负载均衡", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Mini_MultiMode.ini" },
+    { group: "ACL4SSR", label: "精简版 带港美日国家", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Mini_MultiCountry.ini" },
+    { group: "ACL4SSR", label: "全分组 重度用户使用", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Full.ini" },
+    { group: "ACL4SSR", label: "全分组 多模式 重度用户使用", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Full_MultiMode.ini" },
+    { group: "ACL4SSR", label: "全分组 无自动测速 重度用户使用", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Full_NoAuto.ini" },
+    { group: "ACL4SSR", label: "全分组 重度用户使用 更多去广告", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Full_AdblockPlus.ini" },
+    { group: "ACL4SSR", label: "全分组 重度用户使用 奈飞全量", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Full_Netflix.ini" },
+    { group: "ACL4SSR", label: "全分组 重度用户使用 谷歌细分", url: ACL4SSR_CONFIG_BASE + "ACL4SSR_Online_Full_Google.ini" },
+    { group: "CF 优选", label: "精简版 自动测速、故障转移、负载均衡", url: ACL4SSR_CF_CONFIG_BASE + "ACL4SSR_Online_Mini_MultiMode_CF.ini" },
+    { group: "CF 优选", label: "精简版 不带自动测速", url: ACL4SSR_CF_CONFIG_BASE + "ACL4SSR_Online_Mini_NoAuto_CF.ini" },
+    { group: "CF 优选", label: "多国分组", url: ACL4SSR_CF_CONFIG_BASE + "ACL4SSR_Online_MultiCountry_CF.ini" },
+    { group: "CF 优选", label: "全分组 重度用户使用", url: ACL4SSR_CF_CONFIG_BASE + "ACL4SSR_Online_Full_CF.ini" },
+    { group: "CF 优选", label: "全分组 多模式 重度用户使用", url: ACL4SSR_CF_CONFIG_BASE + "ACL4SSR_Online_Full_MultiMode_CF.ini" },
+    { group: "CF 优选", label: "多国分组 WARP", url: ACL4SSR_CF_CONFIG_BASE + "ACL4SSR_Online_MultiCountry_WARP.ini" },
+    { group: "CF 优选", label: "全分组 多模式 WARP", url: ACL4SSR_CF_CONFIG_BASE + "ACL4SSR_Online_Full_MultiMode_WARP.ini" },
+];
+// 配置文件地址归一化：空串表示不套规则，非空必须是 http(s) 地址
+function normalizeSubConfig(v) {
+    if (typeof v !== "string") return "";
+    const s = v.trim();
+    if (!s) return "";
+    return /^https?:\/\/[^\s]+$/i.test(s) ? s : "";
+}
+// 配置落盘：把一份配置归一化成存储用的完整结构。
+// 面板保存和定时任务回写都走这里，字段只有一处定义，不会出现某条路径漏写。
+function configForStore(cfg, overrides = {}) {
+    const m = { ...cfg, ...overrides };
+    return {
+        uuid: m.uuid,
+        password: typeof m.password === "string" ? m.password.trim() : "",
+        domains: normalizeDomains(m.domains),
+        proxyIps: Array.isArray(m.proxyIps) ? m.proxyIps : [],
+        entries: Array.isArray(m.entries) ? m.entries : [],
+        proxies: Array.isArray(m.proxies) ? m.proxies : [],
+        globalProxy: !!m.globalProxy,
+        fallbackTimeout: m.fallbackTimeout || 100,
+        subConvertBase: normalizeServiceBase(m.subConvertBase) || DEFAULT_SUBCONVERTER_BASE,
+        subConfig: normalizeSubConfig(m.subConfig),
+        bestIpApi: m.bestIpApi || DEFAULT_BEST_IP_API,
+        autoUpdateBestIp: !!m.autoUpdateBestIp,
+        proxyApi: typeof m.proxyApi === "string" ? m.proxyApi.trim() : "",
+        autoUpdateProxies: !!m.autoUpdateProxies,
+        proxyProtocols: (m.proxyProtocols && m.proxyProtocols.length) ? m.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS,
+        protocols: (m.protocols && m.protocols.length) ? m.protocols : ["vless", "trojan"],
+        ech: !!m.ech,
+        echConfig: {
+            sni: (typeof m.echConfig?.sni === "string" ? m.echConfig.sni.trim() : "") || DEFAULT_ECH_SNI,
+            dns: (typeof m.echConfig?.dns === "string" ? m.echConfig.dns.trim() : "") || DEFAULT_ECH_DNS,
+        },
+    };
 }
 const DEFAULT_CONFIG = {
     uuid: DEFAULT_UUID,
@@ -108,7 +172,8 @@ const DEFAULT_CONFIG = {
     proxies: [],               // 其它代理：[{proxy, remark}]
     globalProxy: false,        // true 只走其它代理；false 优先直连，失败回退其它代理
     fallbackTimeout: 100,
-    subLinkBase: DEFAULT_SUBLINK_BASE,
+    subConvertBase: DEFAULT_SUBCONVERTER_BASE,   // 订阅转换服务（subconverter 根地址）
+    subConfig: "",                               // 订阅转换配置文件（ACL4SSR .ini），空 = 不套规则
     bestIpApi: DEFAULT_BEST_IP_API, autoUpdateBestIp: false,
     proxyApi: DEFAULT_PROXY_API, autoUpdateProxies: false,
     proxyProtocols: SUPPORTED_PROXY_PROTOCOLS,
@@ -424,10 +489,10 @@ function getPanelBoot(env, cfg) {
 
 async function getUserConfig(env) {
     const fallback = { ...DEFAULT_CONFIG };
-    // SUBLINK_BASE 环境变量作为「部署级默认值」：存储里没有 subLinkBase 时（老配置）生效。
-    // 面板上保存过一次之后就以北面板里的值为准。
-    const envBase = normalizeSubLinkBase(env?.SUBLINK_BASE);
-    if (envBase) fallback.subLinkBase = envBase;
+    // SUBCONVERTER_BASE 环境变量作为「部署级默认值」：存储里没有 subConvertBase 时生效。
+    // 面板上保存过一次之后以面板里的值为准。
+    const envBase = normalizeServiceBase(env?.SUBCONVERTER_BASE);
+    if (envBase) fallback.subConvertBase = envBase;
     try {
         const cfg = await env.VTPanel?.get("user_config", "json");
         const m = cfg || {};
@@ -451,7 +516,8 @@ async function getUserConfig(env) {
             typeof m.fallbackTimeout === "number"
                 ? Math.max(1, Math.min(5000, m.fallbackTimeout)) : 100;
         m.bestIpApi = m.bestIpApi || DEFAULT_BEST_IP_API;
-        m.subLinkBase = normalizeSubLinkBase(m.subLinkBase) || fallback.subLinkBase;
+        m.subConvertBase = normalizeServiceBase(m.subConvertBase) || fallback.subConvertBase;
+        m.subConfig = normalizeSubConfig(m.subConfig);
         m.autoUpdateBestIp = !!m.autoUpdateBestIp;
         m.proxyApi = (typeof m.proxyApi === "string" && m.proxyApi.trim()) || DEFAULT_PROXY_API;
         m.autoUpdateProxies = !!m.autoUpdateProxies;
@@ -2646,10 +2712,14 @@ export default {
                     if (!newUUID) return json({ error: "UUID不能为空" }, 400);
                     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(newUUID))
                         return json({ error: "UUID格式不正确，需为标准 UUID（8-4-4-4-12 十六进制）" }, 400);
-                    if (typeof incoming.subLinkBase === "string" &&
-                        incoming.subLinkBase.trim() &&
-                        !normalizeSubLinkBase(incoming.subLinkBase))
+                    if (typeof incoming.subConvertBase === "string" &&
+                        incoming.subConvertBase.trim() &&
+                        !normalizeServiceBase(incoming.subConvertBase))
                         return json({ error: "订阅转换服务地址格式不正确，需是 http(s):// 开头的服务地址（不要带 ? 参数）" }, 400);
+                    if (typeof incoming.subConfig === "string" &&
+                        incoming.subConfig.trim() &&
+                        !normalizeSubConfig(incoming.subConfig))
+                        return json({ error: "订阅转换配置文件地址格式不正确，需是 http(s):// 开头的 .ini 地址" }, 400);
                     let domains = normalizeDomains(incoming.domains);
                     if (incoming.domain) {
                         const d = (incoming.domain + "").trim();
@@ -2669,27 +2739,11 @@ export default {
                         typeof incoming.fallbackTimeout === "number"
                             ? Math.max(1, Math.min(5000, incoming.fallbackTimeout))
                             : 100;
-                    const normalized = {
+                    const normalized = configForStore(incoming, {
                         uuid: newUUID,
-                        password: typeof incoming.password === "string" ? incoming.password.trim() : "",
                         domains, proxyIps, entries, proxies,
-                        globalProxy: !!incoming.globalProxy,
                         fallbackTimeout,
-                        subLinkBase: normalizeSubLinkBase(incoming.subLinkBase) || DEFAULT_SUBLINK_BASE,
-                        bestIpApi: incoming.bestIpApi || DEFAULT_BEST_IP_API,
-                        autoUpdateBestIp: !!incoming.autoUpdateBestIp,
-                        proxyApi: typeof incoming.proxyApi === "string" ? incoming.proxyApi.trim() : "",
-                        autoUpdateProxies: !!incoming.autoUpdateProxies,
-                        proxyProtocols: (Array.isArray(incoming.proxyProtocols) && incoming.proxyProtocols.length) ? incoming.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS,
-                        protocols: Array.isArray(incoming.protocols) && incoming.protocols.length > 0
-                            ? incoming.protocols
-                            : ["vless", "trojan"],
-                        ech: !!incoming.ech,
-                        echConfig: {
-                            sni: (typeof incoming.echConfig?.sni === "string" ? incoming.echConfig.sni.trim() : "") || DEFAULT_ECH_SNI,
-                            dns: (typeof incoming.echConfig?.dns === "string" ? incoming.echConfig.dns.trim() : "") || DEFAULT_ECH_DNS,
-                        },
-                    };
+                    });
                     if (env.VTPanel)
                         await env.VTPanel.put("user_config", JSON.stringify(normalized));
                     return json({ success: true, message: "配置保存成功" });
@@ -2761,70 +2815,60 @@ export default {
                 "Cache-Control": "no-store",
             };
             const encodedNodes = b64e(nodesContent);
+            // 没有对应输出格式、或转换服务不可用时，统一回这份 base64 节点列表
+            const 原始节点列表 = () => new Response(encodedNodes + "\n", {
+                status: 200,
+                headers: responseHeaders,
+            });
             // "surge&ver=4" 这类带参数的 target 先按 & 截断再取端点
             const 端点名 = String(订阅类型).split("&")[0].trim().toLowerCase();
-            const endpoint = SUBLINK_TARGET_ENDPOINTS[端点名];
-            // mixed，以及 Sublink 不支持的格式（quanx / loon 等）：直接返回通用 base64 节点列表
-            if (!endpoint) {
-                return new Response(encodedNodes + "\n", {
-                    status: 200,
-                    headers: responseHeaders,
-                });
-            }
-            // 转换服务地址已在 getUserConfig 里归一化（面板配置 > 环境变量 SUBLINK_BASE > 内置默认值）
-            const sublinkBase = normalizeSubLinkBase(userConfig.subLinkBase) || DEFAULT_SUBLINK_BASE;
-            const 订阅转换URL = `${sublinkBase}/${endpoint}?config=${encodeURIComponent(encodedNodes)}`;
-            // 透传客户端 UA：Sublink 会据此选择 sing-box 配置档位（1.11 / 1.12 / 1.14），
-            // 用固定的假 UA 会让老版本 sing-box 拿到不兼容的配置。
+            const target = SUBCONVERTER_TARGETS[端点名];
+            // mixed，以及没有对应输出格式的（quanx / loon 等）：直接返回通用 base64 节点列表
+            if (!target) return 原始节点列表();
+            // 转换统一交给 subconverter（ZQ-SubApi 就是这层）：节点名单仍由本面板生成，
+            // url 带 b64=1 让 subconverter 回源时直接拿到 base64 节点列表，规则完全由 config 决定。
+            const 转换服务 = normalizeServiceBase(userConfig.subConvertBase) || DEFAULT_SUBCONVERTER_BASE;
+            const 转换参数 = new URLSearchParams({
+                target,
+                url: `${url.origin}/sub?uuid=${encodeURIComponent(userConfig.uuid)}&b64=1`,
+                udp: "true",
+                emoji: "false",
+                list: "false",
+            });
+            if (端点名 === "surge") 转换参数.set("ver", "4");
+            if (userConfig.subConfig) 转换参数.set("config", userConfig.subConfig);
+            const 订阅转换URL = `${转换服务}/sub?${转换参数}`;
+            // 透传客户端 UA：subconverter 据此判断客户端能力，固定假 UA 会拿到不匹配的输出
             const clientUA = req.headers.get("User-Agent") || "";
-            const convertUA = /^[\x20-\x7e]{1,200}$/.test(clientUA) ? clientUA : `Sublink/${endpoint}`;
+            const convertUA = /^[\x20-\x7e]{1,200}$/.test(clientUA) ? clientUA : `ZQ-VTPanel/${端点名}`;
             try {
                 const response = await fetch(订阅转换URL, {
                     headers: { "User-Agent": convertUA, Accept: "*/*" },
                 });
-                if (response.ok) {
-                    let 转换后内容 = await response.text();
-                    // ECH 热补丁：订阅转换后 ECH 信息丢失，需在返回前补回
-                    if (userConfig.ech && endpoint === "clash") {
+                // 转换服务异常时退回 base64 节点列表，订阅不至于整条挂掉
+                if (!response.ok) return 原始节点列表();
+                let 转换后内容 = await response.text();
+                // ECH 热补丁：subconverter 会丢掉 URI 里的 ech 参数，返回前按 UUID 补回
+                if (端点名 === "clash") {
+                    if (userConfig.ech)
                         转换后内容 = clashEchHotPatch(转换后内容, {
                             uuid: userConfig.uuid,
                             echSni,
                             echDns,
                             hosts: echHosts,
                         });
-                        responseHeaders["content-type"] = "application/x-yaml; charset=utf-8";
-                    } else if (userConfig.ech && endpoint === "singbox") {
+                    responseHeaders["content-type"] = "application/x-yaml; charset=utf-8";
+                } else if (端点名 === "singbox") {
+                    if (userConfig.ech)
                         转换后内容 = singboxEchHotPatch(转换后内容, {
                             uuid: userConfig.uuid,
                             echSni,
                         });
-                        responseHeaders["content-type"] = "application/json; charset=utf-8";
-                    } else {
-                        if (endpoint === "clash")
-                            responseHeaders["content-type"] = "application/x-yaml; charset=utf-8";
-                        else if (endpoint === "singbox")
-                            responseHeaders["content-type"] = "application/json; charset=utf-8";
-                    }
-                    return new Response(转换后内容, { status: 200, headers: responseHeaders });
-                } else {
-                    const errorText = await response.text().catch(() => "");
-                    return text(
-                        "订阅转换失败: " +
-                            response.status +
-                            " " +
-                            response.statusText +
-                            "\n" +
-                            errorText +
-                            "\nURL: " +
-                            订阅转换URL,
-                        500,
-                    );
+                    responseHeaders["content-type"] = "application/json; charset=utf-8";
                 }
+                return new Response(转换后内容, { status: 200, headers: responseHeaders });
             } catch {
-                return new Response(encodedNodes + "\n", {
-                    status: 200,
-                    headers: responseHeaders,
-                });
+                return 原始节点列表();
             }
         }
 
@@ -2884,7 +2928,7 @@ export default {
 		    font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
 		    margin: 0;
 		    min-height: 100vh;
-		    background: linear-gradient(135deg,var(--bg-gradient-start) 0%,var(--bg-gradient-end) 100%);
+		    background: #f4f5f7;
 		    color: var(--text-primary);
 		    line-height: 1.6;
 		    display: flex;
@@ -3008,21 +3052,18 @@ export default {
 	<title>ZQ-VTPanel</title>
 	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%232563eb%22%2F%3E%3Cstop%20offset%3D%22.55%22%20stop-color%3D%22%233b82f6%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237c3aed%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2215%22%20fill%3D%22url(%23g)%22%2F%3E%3Crect%20x%3D%226.5%22%20y%3D%226.5%22%20width%3D%2251%22%20height%3D%2251%22%20rx%3D%229.5%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-opacity%3D%22.38%22%20stroke-width%3D%221.6%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2241%22%20text-anchor%3D%22middle%22%20font-family%3D%22-apple-system%2CBlinkMacSystemFont%2C'Segoe%20UI'%2CRoboto%2CArial%2Csans-serif%22%20font-size%3D%2225%22%20font-weight%3D%22800%22%20fill%3D%22%23ffffff%22%20letter-spacing%3D%221%22%3EVT%3C%2Ftext%3E%3C%2Fsvg%3E">
 	<style>
-	:root{--primary:#2563eb;--primary-light:#3b82f6;--primary-dark:#1d4ed8;--bg1:#c7d8ff;--bg2:#e3d5ff;--bg3:#ffd9ec;--glass:rgba(255,255,255,.55);--glass-strong:rgba(255,255,255,.72);--line:rgba(96,130,210,.4);--text:#1e3a5f;--muted:#64748b;--border:rgba(96,130,210,.45);--shadow:0 8px 24px rgba(37,99,235,.10);--shadow-lg:0 18px 50px rgba(37,99,235,.16)}
+	:root{--primary:#2563eb;--primary-light:#3b82f6;--primary-dark:#1d4ed8;--glass:#fff;--glass-strong:#fff;--line:rgba(15,23,42,.08);--text:#1f2937;--muted:#6b7280;--border:rgba(15,23,42,.12);--shadow:0 1px 3px rgba(15,23,42,.05);--shadow-lg:0 2px 12px rgba(15,23,42,.06)}
 *{box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;margin:0;min-height:100vh;background:linear-gradient(135deg,var(--bg1),var(--bg2),var(--bg3));color:var(--text);line-height:1.6;overflow-x:hidden}
-body::before,body::after{content:'';position:fixed;border-radius:50%;filter:blur(90px);opacity:.65;z-index:-1;pointer-events:none}
-body::before{width:420px;height:420px;background:radial-gradient(circle,rgba(59,130,246,.7),transparent 70%);top:-140px;left:-120px}
-body::after{width:460px;height:460px;background:radial-gradient(circle,rgba(168,85,247,.6),transparent 70%);bottom:-160px;right:-120px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;margin:0;min-height:100vh;background:#f4f5f7;color:var(--text);line-height:1.6;overflow-x:hidden}
 .wrap{max-width:1000px;margin:0 auto;padding:32px 24px;position:relative}
 .header{text-align:center;margin-bottom:32px;padding:24px 0}
 h1{margin:0;font-size:34px;font-weight:800;letter-spacing:.5px;background:linear-gradient(135deg,var(--primary),var(--primary-light),#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 .topbar{position:absolute;right:24px;top:32px;display:flex;gap:12px}
 .topbar a{width:44px;height:44px;border-radius:14px;background:var(--glass-strong);border:1px solid var(--line);color:var(--primary);display:inline-flex;align-items:center;justify-content:center;transition:background-color .2s,color .2s,transform .2s;box-shadow:var(--shadow)}
 .topbar a:hover{background:var(--primary);color:#fff;transform:translateY(-3px)}
-.main-card{background:var(--glass);border-radius:24px;padding:28px;margin-bottom:24px;box-shadow:var(--shadow-lg);border:1px solid var(--line);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);animation:rise .4s ease both}
+.main-card{background:var(--glass);border-radius:24px;padding:28px;margin-bottom:24px;box-shadow:var(--shadow-lg);border:1px solid var(--line);animation:rise .4s ease both}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-.url-box{background:rgba(255,255,255,.55);border:1px solid var(--line);border-radius:14px;padding:16px;font-family:Monaco,Consolas,monospace;font-size:13px;color:var(--text);word-break:break-all;position:relative;overflow:hidden}
+.url-box{background:#f9fafb;border:1px solid var(--line);border-radius:14px;padding:16px;font-family:Monaco,Consolas,monospace;font-size:13px;color:var(--text);word-break:break-all;position:relative;overflow:hidden}
 .url-box::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--primary),var(--primary-light),#7c3aed)}
 .button-group{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}
 .btn{flex:1;min-width:120px;padding:12px 20px;border-radius:12px;border:1px solid transparent;font-size:14px;font-weight:600;cursor:pointer;transition:transform .18s,box-shadow .18s,background-color .18s;display:inline-flex;align-items:center;justify-content:center;gap:6px}
@@ -3037,8 +3078,21 @@ h1{margin:0;font-size:34px;font-weight:800;letter-spacing:.5px;background:linear
 .btn-danger:hover{transform:translateY(-2px)}
 .form-group{margin-bottom:20px}
 label{display:block;margin-bottom:8px;font-weight:600;color:var(--text)}
-input[type=text],input[type=number]{width:100%;padding:12px 16px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.6);color:var(--text);font-size:14px;box-sizing:border-box;transition:border-color .18s,background-color .18s,box-shadow .18s}
-input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255,.85);box-shadow:0 0 0 4px rgba(37,99,235,.12)}
+input[type=text],input[type=number]{width:100%;padding:12px 16px;border:1px solid var(--border);border-radius:12px;background:#fff;color:var(--text);font-size:14px;box-sizing:border-box;transition:border-color .18s,box-shadow .18s}
+#subConfig{display:none}
+.picker{position:relative}
+.picker-trigger{-webkit-appearance:none;appearance:none;width:100%;padding:12px 40px 12px 16px;border:1px solid var(--border);border-radius:12px;background:#fff;color:var(--text);font-size:14px;font-family:inherit;line-height:1.5;text-align:left;cursor:pointer;position:relative;transition:border-color .18s,box-shadow .18s}
+.picker.open .picker-trigger{border-color:var(--primary);box-shadow:0 0 0 4px rgba(37,99,235,.10)}
+.picker-trigger::after{content:'';position:absolute;right:17px;top:50%;width:8px;height:8px;border-right:1.7px solid var(--muted);border-bottom:1.7px solid var(--muted);transform:translateY(-70%) rotate(45deg);transition:transform .18s}
+.picker.open .picker-trigger::after{transform:translateY(-30%) rotate(-135deg)}
+.picker-panel{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:60;display:none;max-height:320px;overflow:auto;scrollbar-width:thin;padding:6px;background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 24px rgba(15,23,42,.10)}
+.picker.open .picker-panel{display:block}
+.picker.up .picker-panel{top:auto;bottom:calc(100% + 6px)}
+.picker-group{padding:6px 10px 2px;font-size:12px;font-weight:600;color:var(--muted)}
+.picker-item{padding:8px 10px;border-radius:8px;font-size:14px;color:var(--text);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.picker-item:hover{background:#f3f4f6}
+.picker-item.on{background:#eff6ff;color:var(--primary);font-weight:600}
+input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 .input-group{display:flex;gap:8px;align-items:center}
 .input-group input{flex:1 1 0%;min-width:0}
 .input-group .btn,.list-item .btn{flex:none;min-width:auto;padding:10px 16px;font-size:13px}
@@ -3048,10 +3102,10 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .link-arrow{color:var(--primary);text-decoration:none;font-size:14px;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:8px;background:var(--glass-strong);transition:background-color .2s,color .2s;margin-left:8px;flex:none}
 .link-arrow:hover{background:var(--primary);color:#fff}
 .label-with-link{display:flex;align-items:center}
-.collapse-section{margin-bottom:16px;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:rgba(255,255,255,.42);transition:border-color .2s}
-.collapse-section:hover{border-color:rgba(147,197,253,.8)}
+.collapse-section{margin-bottom:16px;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#fafbfc;transition:border-color .2s}
+.collapse-section:hover{border-color:rgba(15,23,42,.18)}
 .collapse-header{width:100%;padding:16px 20px;background:transparent;border:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:16px;font-weight:700;color:var(--text);transition:background-color .2s;text-align:left}
-.collapse-header:hover{background:rgba(255,255,255,.35)}
+.collapse-header:hover{background:#f3f4f6}
 .collapse-header .icon{transition:transform .3s}
 .collapse-header.active .icon{transform:rotate(180deg)}
 .collapse-content{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 20px}
@@ -3059,10 +3113,10 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .cc-inner{overflow:hidden}
 .ch-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .ch-dot{width:9px;height:9px;border-radius:3px;flex:none}
-.sub-block{border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.45);overflow:hidden}
+.sub-block{border:1px solid var(--line);border-radius:14px;background:#fff;overflow:hidden}
 .sub-block + .sub-block{margin-top:12px}
-.sub-head{width:100%;padding:14px 16px;font-size:16px;font-weight:700;color:var(--text);background:rgba(255,255,255,.35);border:none;border-radius:0;display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;text-align:left;transition:background-color .2s}
-.sub-head:hover{background:rgba(255,255,255,.55)}
+.sub-head{width:100%;padding:14px 16px;font-size:16px;font-weight:700;color:var(--text);background:#f9fafb;border:none;border-radius:0;display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;text-align:left;transition:background-color .2s}
+.sub-head:hover{background:#f3f4f6}
 .sub-head .icon{font-size:13px;color:var(--muted)}
 	.sub-title{display:inline-flex;align-items:center;gap:8px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 	.sub-right{display:inline-flex;align-items:center;gap:10px;flex:none}
@@ -3081,9 +3135,9 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 .gt-switch input:checked + .gt-slider{background:var(--primary)}
 .gt-switch input:checked + .gt-slider::after{left:18px}
 .proto-pills{display:flex;gap:10px;flex-wrap:wrap}
-.proto-pill{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.55);cursor:pointer;user-select:none;font-weight:600;font-size:14px;color:var(--text);transition:border-color .2s,background-color .2s}
+.proto-pill{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border:1px solid var(--border);border-radius:12px;background:#fff;cursor:pointer;user-select:none;font-weight:600;font-size:14px;color:var(--text);transition:border-color .2s,background-color .2s}
 .proto-pill input{display:none}
-.proto-pill.on{border-color:var(--primary);background:linear-gradient(135deg,rgba(37,99,235,.15),rgba(124,58,237,.12));box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.proto-pill.on{border-color:var(--primary);background:#eff6ff;box-shadow:0 0 0 3px rgba(37,99,235,.10)}
 .qr-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(30,58,95,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:1000;align-items:center;justify-content:center;padding:20px}
 .qr-modal.active{display:flex}
 .qr-content{background:var(--glass-strong);border-radius:24px;padding:32px;text-align:center;max-width:400px;width:100%;box-shadow:var(--shadow-lg);border:1px solid var(--line);position:relative;backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);animation:rise .35s ease}
@@ -3104,14 +3158,14 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 	.header{margin-bottom:18px;padding:14px 0}
 	h1{font-size:24px}
 	.topbar{position:static;justify-content:center;margin-bottom:16px}
-	.main-card{padding:18px 14px;border-radius:20px;background:rgba(255,255,255,.72);backdrop-filter:none;-webkit-backdrop-filter:none}
+	.main-card{padding:18px 14px;border-radius:20px;background:#fff}
 	.btn{min-width:100%;margin-bottom:6px;padding:12px 16px;font-size:14px}
 	.collapse-section{margin-bottom:12px;border-radius:14px}
 	.collapse-header{padding:13px 14px;font-size:15px}
 	.collapse-content.active{padding:14px 12px}
 	.form-group{margin-bottom:14px}
 	.input-group,.list-item{gap:6px}
-	input[type=text],input[type=number]{padding:10px 12px;font-size:13px}
+	input[type=text],input[type=number],select{padding:10px 12px;font-size:13px}
 	.input-group input:first-child,.list-item input:first-child{flex:2 1 0%}
 	.input-group .btn,.list-item .btn{padding:10px 10px;font-size:13px;margin-bottom:0}
 	.link-arrow{width:28px;height:28px;margin-left:4px}
@@ -3162,14 +3216,20 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 					</div>
 					<div class="form-group">
 						<label>协议类型</label>
-						<div class="proto-pills" id="protocolsBox">
+						<div class="proto-pills">
 							<div class="proto-pill on" data-proto="vless"><input type="checkbox" value="vless" checked>VLESS</div>
 							<div class="proto-pill on" data-proto="trojan"><input type="checkbox" value="trojan" checked>Trojan</div>
 						</div>
 					</div>
 					<div class="form-group">
-						<label for="subLinkBase">订阅转换服务</label>
-						<input type="text" id="subLinkBase" name="subLinkBase" placeholder="${DEFAULT_SUBLINK_BASE}">
+						<label for="subConvertBase">订阅转换服务</label>
+						<input type="text" id="subConvertBase" name="subConvertBase" placeholder="${DEFAULT_SUBCONVERTER_BASE}">
+					</div>
+					<div class="form-group">
+						<label for="subConfig">订阅转换配置文件</label>
+						<div class="picker" id="subConfigPicker"></div>
+						<select id="subConfig" name="subConfig"></select>
+						<input type="text" id="subConfigCustom" placeholder="https://…/ACL4SSR_Online.ini" style="display:none;margin-top:8px">
 					</div>
 					<div class="form-group">
 						<div class="label-with-link">
@@ -3411,6 +3471,77 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 
 				var state = { domains: [], proxyIps: [], entries: [], proxies: [] };
 
+				var SUB_CONFIG_LIST = ${JSON.stringify(DEFAULT_SUB_CONFIG_LIST)};
+				var CUSTOM_FLAG = '__custom__';
+				function buildSubConfigSelect() {
+					var sel = document.getElementById('subConfig');
+					var picker = document.getElementById('subConfigPicker');
+					var custom = document.getElementById('subConfigCustom');
+					var trigger = document.createElement('button');
+					trigger.type = 'button';
+					trigger.className = 'picker-trigger';
+					var panel = document.createElement('div');
+					panel.className = 'picker-panel';
+					picker.append(trigger, panel);
+					var list = SUB_CONFIG_LIST.concat({ group: '', label: '自定义地址', url: CUSTOM_FLAG });
+					list.forEach(function (it) { sel.add(new Option(it.label, it.url)); });
+					var unclipped = [];
+					function render() {
+						var cur = sel.value, text = list[0].label, group = '', html = '';
+						list.forEach(function (it) {
+							if (it.url === cur) text = it.label;
+							if (it.group && it.group !== group) { html += '<div class="picker-group">' + it.group + '</div>'; group = it.group; }
+							html += '<div class="picker-item' + (it.url === cur ? ' on' : '') + '" data-url="' + it.url + '">' + it.label + '</div>';
+						});
+						trigger.textContent = text;
+						panel.innerHTML = html;
+						custom.style.display = cur === CUSTOM_FLAG ? 'block' : 'none';
+					}
+					function open(on) {
+						picker.classList.toggle('open', on);
+						unclipped.forEach(function (el) { el.style.overflow = ''; });
+						unclipped = [];
+						if (!on) return;
+						// 折叠区/卡片是 overflow:hidden，会裁掉展开的列表，打开期间临时放开
+						for (var el = picker.parentElement; el && el !== document.body; el = el.parentElement) {
+							if (getComputedStyle(el).overflow !== 'visible') {
+								unclipped.push(el);
+								el.style.overflow = 'visible';
+							}
+						}
+						var box = trigger.getBoundingClientRect();
+						picker.classList.toggle('up', window.innerHeight - box.bottom < 340 && box.top > 340);
+					}
+					trigger.onclick = function (e) { e.stopPropagation(); open(!picker.classList.contains('open')); };
+					panel.onclick = function (e) {
+						var row = e.target.closest('.picker-item');
+						if (!row) return;
+						sel.value = row.dataset.url;
+						open(false);
+						render();
+						setTimeout(syncHeights, 0);
+					};
+					document.addEventListener('click', function (e) { if (!picker.contains(e.target)) open(false); });
+					window.addEventListener('resize', function () { open(false); });
+					picker.sync = function () { render(); setTimeout(syncHeights, 0); };
+					render();
+				}
+				function getSubConfigValue() {
+					var sel = document.getElementById('subConfig');
+					return sel.value === CUSTOM_FLAG ? document.getElementById('subConfigCustom').value.trim() : sel.value;
+				}
+				function setSubConfigValue(url) {
+					var sel = document.getElementById('subConfig');
+					var custom = document.getElementById('subConfigCustom');
+					if (url && !SUB_CONFIG_LIST.some(function (it) { return it.url === url; })) {
+						sel.value = CUSTOM_FLAG;
+						custom.value = url;
+					} else {
+						sel.value = url || '';
+						custom.value = '';
+					}
+					document.getElementById('subConfigPicker').sync();
+				}
 				function isUuid(s) {
 					if (s.length !== 36) return false;
 					var hex = '0123456789abcdefABCDEF';
@@ -3436,7 +3567,8 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						document.getElementById('panelPassword').value = cfg.password || '';
 						document.getElementById('fallbackTimeout').value = cfg.fallbackTimeout || 100;
 						document.getElementById('bestIpApi').value = cfg.bestIpApi || 'https://ipdb.api.030101.xyz/?type=bestcf';
-						document.getElementById('subLinkBase').value = cfg.subLinkBase || '${DEFAULT_SUBLINK_BASE}';
+						document.getElementById('subConvertBase').value = cfg.subConvertBase || '${DEFAULT_SUBCONVERTER_BASE}';
+						setSubConfigValue(cfg.subConfig || '');
 						document.getElementById('echEnabled').checked = !!cfg.ech;
 						var echCfg = (cfg.echConfig && typeof cfg.echConfig === 'object') ? cfg.echConfig : {};
 						document.getElementById('echSni').value = echCfg.sni || '';
@@ -3475,9 +3607,11 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 					var uuid = document.getElementById('uuid').value.trim();
 					if (!uuid) { showMessage('UUID 不能为空', 'error'); return; }
 					if (!isUuid(uuid)) { showMessage('UUID 格式不正确，需为标准 UUID（8-4-4-4-12 位十六进制）', 'error'); return; }
-					var subLinkBase = document.getElementById('subLinkBase').value.trim();
-					if (subLinkBase && !(subLinkBase.indexOf('http://') === 0 || subLinkBase.indexOf('https://') === 0)) { showMessage('订阅转换服务地址需以 http:// 或 https:// 开头', 'error'); return; }
-					if (subLinkBase && (subLinkBase.indexOf('?') !== -1 || subLinkBase.indexOf('#') !== -1)) { showMessage('订阅转换服务地址只填服务根地址，不要带 ? 参数', 'error'); return; }
+					var subConvertBase = document.getElementById('subConvertBase').value.trim();
+					if (subConvertBase && !(subConvertBase.indexOf('http://') === 0 || subConvertBase.indexOf('https://') === 0)) { showMessage('订阅转换服务地址需以 http:// 或 https:// 开头', 'error'); return; }
+					if (subConvertBase && (subConvertBase.indexOf('?') !== -1 || subConvertBase.indexOf('#') !== -1)) { showMessage('订阅转换服务地址只填服务根地址，不要带 ? 参数', 'error'); return; }
+					var subConfig = getSubConfigValue();
+					if (subConfig && !(subConfig.indexOf('http://') === 0 || subConfig.indexOf('https://') === 0)) { showMessage('订阅转换配置文件需是 http:// 或 https:// 开头的 .ini 地址', 'error'); return; }
 					var protocols = [];
 					document.querySelectorAll('.proto-pill input').forEach(function (cb) { if (cb.checked) protocols.push(cb.value); });
 					if (!protocols.length) { showMessage('请至少选择一个协议类型', 'error'); return; }
@@ -3491,7 +3625,8 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 						globalProxy: document.getElementById('globalProxy').checked,
 						fallbackTimeout: parseInt(document.getElementById('fallbackTimeout').value, 10) || 100,
 						bestIpApi: document.getElementById('bestIpApi').value.trim() || 'https://ipdb.api.030101.xyz/?type=bestcf',
-						subLinkBase: subLinkBase,
+						subConvertBase: subConvertBase,
+						subConfig: subConfig,
 						autoUpdateBestIp: document.getElementById('autoUpdateBestIp').checked,
 						proxyApi: document.getElementById('proxyApi').value.trim(),
 						autoUpdateProxies: document.getElementById('autoUpdateProxies').checked,
@@ -3628,6 +3763,7 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
 
 				document.getElementById('configForm').addEventListener('submit', function (e) { e.preventDefault(); saveConfigForm(); });
 
+				buildSubConfigSelect();
 				loadConfig();
 			})();
 		</script>
@@ -3731,32 +3867,12 @@ input:focus{outline:none;border-color:var(--primary);background:rgba(255,255,255
         }
 
         // 3) 有更新时整份回写（带全所有字段，避免抹掉其它配置）
-        if (domains || proxies) {
-            const normalized = {
-                uuid: cfg.uuid,
-                password: cfg.password || "",
-                domains: domains || normalizeDomains(cfg.domains),
-                proxyIps: cfg.proxyIps || [],
-                entries: cfg.entries || [],
-                proxies: proxies || (cfg.proxies || []),
-                globalProxy: !!cfg.globalProxy,
-                fallbackTimeout: cfg.fallbackTimeout || 100,
-                subLinkBase: normalizeSubLinkBase(cfg.subLinkBase) || DEFAULT_SUBLINK_BASE,
-                bestIpApi: cfg.bestIpApi,
-                autoUpdateBestIp: cfg.autoUpdateBestIp,
-                proxyApi: cfg.proxyApi || "",
-                autoUpdateProxies: !!cfg.autoUpdateProxies,
-                proxyProtocols: (cfg.proxyProtocols && cfg.proxyProtocols.length) ? cfg.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS,
-                protocols: cfg.protocols && cfg.protocols.length > 0 ? cfg.protocols : ["vless", "trojan"],
-                ech: !!cfg.ech,
-                echConfig: {
-                    sni: cfg.echConfig?.sni || DEFAULT_ECH_SNI,
-                    dns: cfg.echConfig?.dns || DEFAULT_ECH_DNS,
-                },
-            };
-            if (env.VTPanel) {
-                await env.VTPanel.put("user_config", JSON.stringify(normalized));
-            }
+        if ((domains || proxies) && env.VTPanel) {
+            const normalized = configForStore(cfg, {
+                domains: domains || cfg.domains,
+                proxies: proxies || cfg.proxies,
+            });
+            await env.VTPanel.put("user_config", JSON.stringify(normalized));
         }
     },
 };
