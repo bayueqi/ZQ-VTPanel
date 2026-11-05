@@ -261,15 +261,19 @@ const CLASH_BASE_DNS = `dns:
       - '+.youtube.com'
 `;
 
+// 无条件补 dns 段：subconverter 不输出 dns，交给客户端默认行为就是明文查运营商 DNS
+function ensureClashDns(clashYaml) {
+    let yaml = clashYaml.replace(/mode:\s*Rule\b/g, "mode: rule");
+    if (!/^dns:\s*(?:\n|$)/m.test(yaml)) yaml = CLASH_BASE_DNS + yaml;
+    return yaml;
+}
+
 function clashEchHotPatch(clashYaml, { uuid, echSni, echDns, hosts }) {
     if (!uuid) return clashYaml;
     const echEnabled = Boolean(echSni || echDns);
     const hostList = Array.isArray(hosts) ? [...hosts] : [];
     if (echSni && !hostList.includes(echSni)) hostList.push(echSni);
-    let yaml = clashYaml.replace(/mode:\s*Rule\b/g, "mode: rule");
-
-    // 1. 确保存在 dns 块
-    if (!/^dns:\s*(?:\n|$)/m.test(yaml)) yaml = CLASH_BASE_DNS + yaml;
+    let yaml = ensureClashDns(clashYaml);
 
     // 2. 插入 nameserver-policy，让所有节点域名走 ECH DoH 解析（绕过 DNS 污染）
     if (echEnabled && hostList.length > 0 && echDns) {
@@ -2838,6 +2842,8 @@ export default {
                 let 转换后内容 = await response.text();
                 // ECH 热补丁：subconverter 会丢掉 URI 里的 ech 参数，返回前按 UUID 补回
                 if (端点名 === "clash") {
+                    // dns 段与 ECH 无关，任何情况都要补，否则客户端退回明文解析
+                    转换后内容 = ensureClashDns(转换后内容);
                     if (userConfig.ech)
                         转换后内容 = clashEchHotPatch(转换后内容, {
                             uuid: userConfig.uuid,
