@@ -2820,11 +2820,10 @@ export default {
             // mixed，以及没有对应输出格式的（quanx / loon 等）：直接返回通用 base64 节点列表
             if (!target) return 原始节点列表();
             // 转换统一交给 subconverter 协议的服务（ZQ-SubApi 就是这层）：节点名单由本面板生成，
-            // base64 后直接内联进 url 参数，转换服务无需回源本面板即可完成转换。
+            // base64 后放进 POST body，避免节点多时 URL 过长被网关截断。
             const 转换服务 = normalizeServiceBase(userConfig.subConvertBase) || DEFAULT_SUBCONVERTER_BASE;
             const 转换参数 = new URLSearchParams({
                 target,
-                url: encodedNodes,
                 udp: "true",
                 emoji: "false",
                 list: "false",
@@ -2838,7 +2837,17 @@ export default {
             const convertUA = /^[\x20-\x7e]{1,200}$/.test(clientUA) ? clientUA : `ZQ-VTPanel/${端点名}`;
             try {
                 const response = await fetch(订阅转换URL, {
-                    headers: { "User-Agent": convertUA, Accept: "*/*" },
+                    method: "POST",
+                    headers: {
+                        "User-Agent": convertUA,
+                        Accept: "*/*",
+                        "Content-Type": "text/plain; charset=utf-8",
+                    },
+                    body: encodedNodes,
+                    // 转换服务卡住时不把客户端一起拖死，超时直接给节点列表
+                    signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout
+                        ? AbortSignal.timeout(25000)
+                        : undefined,
                 });
                 // 转换服务异常时退回 base64 节点列表，订阅不至于整条挂掉
                 if (!response.ok) return 原始节点列表();
@@ -3090,9 +3099,9 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .collapse-section:hover{border-color:rgba(15,23,42,.18)}
 .collapse-header{width:100%;padding:16px 20px;background:transparent;border:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:16px;font-weight:700;color:var(--text);transition:background-color .2s;text-align:left}
 .collapse-header:hover{background:#f3f4f6}
-.collapse-header .icon{transition:transform .3s}
+.collapse-header .icon{transition:transform .32s cubic-bezier(.22,1,.36,1)}
 .collapse-header.active .icon{transform:rotate(180deg)}
-.collapse-content{max-height:0;overflow:hidden;transition:max-height .3s ease;padding:0 20px}
+.collapse-content{max-height:0;overflow:hidden;transition:max-height .32s cubic-bezier(.22,1,.36,1);padding:0 20px}
 .collapse-content.active{max-height:3000px;padding:20px}
 .cc-inner{overflow:hidden}
 .ch-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -3401,12 +3410,12 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							c.style.maxHeight = '0px';
 							void c.offsetHeight;
 							setH(c);
-							setTimeout(syncHeights, 0);
-							setTimeout(function () { animating--; settle(c); }, 320);
+							requestAnimationFrame(syncHeights);
+							setTimeout(function () { animating--; settle(c); }, 340);
 						} else {
 							if (c.style.maxHeight === 'none') { c.style.maxHeight = c.scrollHeight + 'px'; void c.offsetHeight; }
 							c.style.maxHeight = '0px';
-							setTimeout(function () { animating--; }, 320);
+							setTimeout(function () { animating--; }, 340);
 						}
 					});
 				});
