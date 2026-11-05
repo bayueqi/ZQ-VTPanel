@@ -3213,7 +3213,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					<div class="form-group">
 						<label for="subConfig">订阅转换配置文件</label>
 						<select id="subConfig" name="subConfig">
-							${SUB_CONFIG_PRESETS.map(([file, label]) => `<option value="${file}">${label}</option>`).join("")}
+							${SUB_CONFIG_PRESETS.map(([file, label]) => `<option value="${file}">${file ? label + " " + file.replace(/\.ini$/, "") : label}</option>`).join("")}
 							<option value="custom">自定义地址</option>
 						</select>
 						<input type="text" id="subConfigCustom" placeholder="https://example.com/my.ini" style="display:none;margin-top:8px">
