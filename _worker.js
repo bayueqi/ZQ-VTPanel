@@ -102,15 +102,23 @@ function normalizeServiceBase(v) {
 const SUB_CONFIG_BASE = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/";
 const SUB_CONFIG_PRESETS = [
     ["", "不使用"],
-    ["ACL4SSR_Online.ini", "ACL4SSR 在线版"],
-    ["ACL4SSR_Online_Full.ini", "ACL4SSR 全量"],
-    ["ACL4SSR_Online_Mini.ini", "ACL4SSR 精简"],
-    ["ACL4SSR_Online_NoAuto.ini", "ACL4SSR 无自动测速"],
-    ["ACL4SSR_Online_Full_NoAuto.ini", "ACL4SSR 全量无自动测速"],
-    ["ACL4SSR_Online_Mini_NoAuto.ini", "ACL4SSR 精简无自动测速"],
-    ["ACL4SSR_Online_Mini_MultiMode.ini", "ACL4SSR 精简多模式"],
-    ["ACL4SSR_Online_Full_MultiMode.ini", "ACL4SSR 全量多模式"],
-    ["ACL4SSR_Online_Full_AdblockPlus.ini", "ACL4SSR 全量去广告"],
+    ["ACL4SSR_Online.ini", "默认版 分组比较全"],
+    ["ACL4SSR_Online_AdblockPlus.ini", "更多去广告"],
+    ["ACL4SSR_Online_MultiCountry.ini", "多国分组"],
+    ["ACL4SSR_Online_NoAuto.ini", "无自动测速"],
+    ["ACL4SSR_Online_NoReject.ini", "无广告拦截规则"],
+    ["ACL4SSR_Online_Mini.ini", "精简版"],
+    ["ACL4SSR_Online_Mini_AdblockPlus.ini", "精简版 更多去广告"],
+    ["ACL4SSR_Online_Mini_NoAuto.ini", "精简版 不带自动测速"],
+    ["ACL4SSR_Online_Mini_Fallback.ini", "精简版 带故障转移"],
+    ["ACL4SSR_Online_Mini_MultiMode.ini", "精简版 自动测速、故障转移、负载均衡"],
+    ["ACL4SSR_Online_Mini_MultiCountry.ini", "精简版 带港澳台国家"],
+    ["ACL4SSR_Online_Full.ini", "全分组 重度用户使用"],
+    ["ACL4SSR_Online_Full_MultiMode.ini", "全分组 多模式"],
+    ["ACL4SSR_Online_Full_NoAuto.ini", "全分组 无自动测速"],
+    ["ACL4SSR_Online_Full_AdblockPlus.ini", "全分组 更多去广告"],
+    ["ACL4SSR_Online_Full_Netflix.ini", "全分组 奈飞全量"],
+    ["ACL4SSR_Online_Full_Google.ini", "全分组 谷歌细分"],
 ];
 // 配置文件地址归一化：空串 = 不启用；预设名补全成完整 raw 地址；也接受用户自填的 http(s) 地址
 function normalizeSubConfig(v) {
