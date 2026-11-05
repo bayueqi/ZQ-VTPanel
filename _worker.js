@@ -2965,22 +2965,6 @@ export default {
 		    border-color: var(--primary);
 		    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
 		}
-		.form-group select {
-		    width: 100%;
-		    padding: 14px;
-		    border: 2px solid var(--border-color);
-		    border-radius: 12px;
-		    background: rgba(255,255,255,0.8);
-		    color: var(--text-primary);
-		    font-size: 16px;
-		    box-sizing: border-box;
-		    transition: all .3s ease;
-		}
-		.form-group select:focus {
-		    outline: none;
-		    border-color: var(--primary);
-		    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
-		}
 		button {
 		    width: 100%;
 		    background: linear-gradient(135deg,var(--primary) 0%,var(--primary-light) 100%);
@@ -3081,7 +3065,9 @@ h1{margin:0;font-size:34px;font-weight:800;letter-spacing:.5px;background:linear
 .btn-danger:hover{transform:translateY(-2px)}
 .form-group{margin-bottom:20px}
 label{display:block;margin-bottom:8px;font-weight:600;color:var(--text)}
-input[type=text],input[type=number]{width:100%;padding:12px 16px;border:1px solid var(--border);border-radius:12px;background:#fff;color:var(--text);font-size:14px;box-sizing:border-box;transition:border-color .18s,box-shadow .18s}
+input[type=text],input[type=number],select{width:100%;padding:12px 16px;border:1px solid var(--border);border-radius:12px;background:#fff;color:var(--text);font-size:14px;box-sizing:border-box;transition:border-color .18s,box-shadow .18s;font-family:inherit}
+select{-webkit-appearance:none;appearance:none;padding-right:40px;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' fill='none' stroke='%236b7280' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 16px center}
+select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 .input-group{display:flex;gap:8px;align-items:center}
 .input-group input{flex:1 1 0%;min-width:0}
@@ -3155,7 +3141,8 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 	.collapse-content.active{padding:14px 12px}
 	.form-group{margin-bottom:14px}
 	.input-group,.list-item{gap:6px}
-	input[type=text],input[type=number],select{padding:10px 12px;font-size:13px}
+	input[type=text],input[type=number]{padding:10px 12px;font-size:13px}
+	select{padding:10px 36px 10px 12px;font-size:13px;background-position:right 12px center}
 	.input-group input:first-child,.list-item input:first-child{flex:2 1 0%}
 	.input-group .btn,.list-item .btn{padding:10px 10px;font-size:13px;margin-bottom:0}
 	.link-arrow{width:28px;height:28px;margin-left:4px}
