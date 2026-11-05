@@ -98,6 +98,29 @@ function normalizeServiceBase(v) {
     if (/[?#]/.test(s)) return "";
     return /^https?:\/\/[^\s/]+/i.test(s) ? s : "";
 }
+// 订阅转换配置文件：subconverter 的 config= 参数，仅对 clash 生效
+const SUB_CONFIG_BASE = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/";
+const SUB_CONFIG_PRESETS = [
+    ["", "不使用"],
+    ["ACL4SSR_Online.ini", "ACL4SSR 在线版"],
+    ["ACL4SSR_Online_Full.ini", "ACL4SSR 全量"],
+    ["ACL4SSR_Online_Mini.ini", "ACL4SSR 精简"],
+    ["ACL4SSR_Online_NoAuto.ini", "ACL4SSR 无自动测速"],
+    ["ACL4SSR_Online_Full_NoAuto.ini", "ACL4SSR 全量无自动测速"],
+    ["ACL4SSR_Online_Mini_NoAuto.ini", "ACL4SSR 精简无自动测速"],
+    ["ACL4SSR_Online_Mini_MultiMode.ini", "ACL4SSR 精简多模式"],
+    ["ACL4SSR_Online_Full_MultiMode.ini", "ACL4SSR 全量多模式"],
+    ["ACL4SSR_Online_Full_AdblockPlus.ini", "ACL4SSR 全量去广告"],
+];
+// 配置文件地址归一化：空串 = 不启用；预设名补全成完整 raw 地址；也接受用户自填的 http(s) 地址
+function normalizeSubConfig(v) {
+    if (typeof v !== "string") return "";
+    const s = v.trim();
+    if (!s) return "";
+    if (SUB_CONFIG_PRESETS.some(([f]) => f && f === s)) return SUB_CONFIG_BASE + s;
+    if (/[?#]/.test(s)) return "";
+    return /^https?:\/\/[^\s/]+/i.test(s) ? s : "";
+}
 // 配置落盘：把一份配置归一化成存储用的完整结构。
 // 面板保存和定时任务回写都走这里，字段只有一处定义，不会出现某条路径漏写。
 function configForStore(cfg, overrides = {}) {
@@ -112,6 +135,7 @@ function configForStore(cfg, overrides = {}) {
         globalProxy: !!m.globalProxy,
         fallbackTimeout: m.fallbackTimeout || 100,
         subConvertBase: normalizeServiceBase(m.subConvertBase) || DEFAULT_SUBCONVERTER_BASE,
+        subConfig: normalizeSubConfig(m.subConfig),
         bestIpApi: m.bestIpApi || DEFAULT_BEST_IP_API,
         autoUpdateBestIp: !!m.autoUpdateBestIp,
         proxyApi: typeof m.proxyApi === "string" ? m.proxyApi.trim() : "",
@@ -135,6 +159,7 @@ const DEFAULT_CONFIG = {
     globalProxy: false,        // true 只走其它代理；false 优先直连，失败回退其它代理
     fallbackTimeout: 100,
     subConvertBase: DEFAULT_SUBCONVERTER_BASE,   // 订阅转换服务（subconverter 根地址）
+    subConfig: "",                             // 订阅转换配置文件（仅 clash）
     bestIpApi: DEFAULT_BEST_IP_API, autoUpdateBestIp: false,
     proxyApi: DEFAULT_PROXY_API, autoUpdateProxies: false,
     proxyProtocols: SUPPORTED_PROXY_PROTOCOLS,
@@ -478,6 +503,7 @@ async function getUserConfig(env) {
                 ? Math.max(1, Math.min(5000, m.fallbackTimeout)) : 100;
         m.bestIpApi = m.bestIpApi || DEFAULT_BEST_IP_API;
         m.subConvertBase = normalizeServiceBase(m.subConvertBase) || fallback.subConvertBase;
+        m.subConfig = normalizeSubConfig(m.subConfig);
         m.autoUpdateBestIp = !!m.autoUpdateBestIp;
         m.proxyApi = (typeof m.proxyApi === "string" && m.proxyApi.trim()) || DEFAULT_PROXY_API;
         m.autoUpdateProxies = !!m.autoUpdateProxies;
@@ -2676,6 +2702,10 @@ export default {
                         incoming.subConvertBase.trim() &&
                         !normalizeServiceBase(incoming.subConvertBase))
                         return json({ error: "订阅转换服务地址格式不正确，需是 http(s):// 开头的服务地址（不要带 ? 参数）" }, 400);
+                    if (typeof incoming.subConfig === "string" &&
+                        incoming.subConfig.trim() &&
+                        !normalizeSubConfig(incoming.subConfig))
+                        return json({ error: "配置文件地址格式不正确，需是 http(s):// 开头的 .ini 地址（不要带 ? 参数）" }, 400);
                     let domains = normalizeDomains(incoming.domains);
                     if (incoming.domain) {
                         const d = (incoming.domain + "").trim();
@@ -2792,6 +2822,8 @@ export default {
                 list: "false",
             });
             if (端点名 === "surge") 转换参数.set("ver", "4");
+            // 配置文件只对 clash 生效：surge / singbox 的配置结构不同，传过去会被忽略或报错
+            if (端点名 === "clash" && userConfig.subConfig) 转换参数.set("config", userConfig.subConfig);
             const 订阅转换URL = `${转换服务}/sub?${转换参数}`;
             // 透传客户端 UA：subconverter 据此判断客户端能力，固定假 UA 会拿到不匹配的输出
             const clientUA = req.headers.get("User-Agent") || "";
@@ -2929,6 +2961,22 @@ export default {
 		    transition: all .3s ease;
 		}
 		input[type="text"]:focus, input[type="password"]:focus {
+		    outline: none;
+		    border-color: var(--primary);
+		    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+		}
+		.form-group select {
+		    width: 100%;
+		    padding: 14px;
+		    border: 2px solid var(--border-color);
+		    border-radius: 12px;
+		    background: rgba(255,255,255,0.8);
+		    color: var(--text-primary);
+		    font-size: 16px;
+		    box-sizing: border-box;
+		    transition: all .3s ease;
+		}
+		.form-group select:focus {
 		    outline: none;
 		    border-color: var(--primary);
 		    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
@@ -3166,6 +3214,14 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					<div class="form-group">
 						<label for="subConvertBase">订阅转换服务</label>
 						<input type="text" id="subConvertBase" name="subConvertBase" placeholder="${DEFAULT_SUBCONVERTER_BASE}">
+					</div>
+					<div class="form-group">
+						<label for="subConfig">订阅转换配置文件</label>
+						<select id="subConfig" name="subConfig">
+							${SUB_CONFIG_PRESETS.map(([file, label]) => `<option value="${file}">${label}</option>`).join("")}
+							<option value="custom">自定义地址</option>
+						</select>
+						<input type="text" id="subConfigCustom" placeholder="https://example.com/my.ini" style="display:none;margin-top:8px">
 					</div>
 					<div class="form-group">
 						<div class="label-with-link">
@@ -3433,6 +3489,24 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						document.getElementById('fallbackTimeout').value = cfg.fallbackTimeout || 100;
 						document.getElementById('bestIpApi').value = cfg.bestIpApi || 'https://ipdb.api.030101.xyz/?type=bestcf';
 						document.getElementById('subConvertBase').value = cfg.subConvertBase || '${DEFAULT_SUBCONVERTER_BASE}';
+						var subCfg = cfg.subConfig || '';
+						var subSel = document.getElementById('subConfig');
+						var subCustom = document.getElementById('subConfigCustom');
+						var presetFiles = ${JSON.stringify(SUB_CONFIG_PRESETS.map(([f]) => f).filter(Boolean))};
+						var presetBase = '${SUB_CONFIG_BASE}';
+						if (!subCfg) {
+							subSel.value = '';
+							subCustom.value = '';
+							subCustom.style.display = 'none';
+						} else if (subCfg.indexOf(presetBase) === 0 && presetFiles.indexOf(subCfg.slice(presetBase.length)) !== -1) {
+							subSel.value = subCfg.slice(presetBase.length);
+							subCustom.value = '';
+							subCustom.style.display = 'none';
+						} else {
+							subSel.value = 'custom';
+							subCustom.value = subCfg;
+							subCustom.style.display = 'block';
+						}
 						document.getElementById('echEnabled').checked = !!cfg.ech;
 						var echCfg = (cfg.echConfig && typeof cfg.echConfig === 'object') ? cfg.echConfig : {};
 						document.getElementById('echSni').value = echCfg.sni || '';
@@ -3474,6 +3548,14 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					var subConvertBase = document.getElementById('subConvertBase').value.trim();
 					if (subConvertBase && !(subConvertBase.indexOf('http://') === 0 || subConvertBase.indexOf('https://') === 0)) { showMessage('订阅转换服务地址需以 http:// 或 https:// 开头', 'error'); return; }
 					if (subConvertBase && (subConvertBase.indexOf('?') !== -1 || subConvertBase.indexOf('#') !== -1)) { showMessage('订阅转换服务地址只填服务根地址，不要带 ? 参数', 'error'); return; }
+					var subConfig = document.getElementById('subConfig').value;
+					if (subConfig === 'custom') {
+						subConfig = document.getElementById('subConfigCustom').value.trim();
+						if (subConfig && !(subConfig.indexOf('http://') === 0 || subConfig.indexOf('https://') === 0)) { showMessage('配置文件地址需以 http:// 或 https:// 开头', 'error'); return; }
+						if (subConfig && (subConfig.indexOf('?') !== -1 || subConfig.indexOf('#') !== -1)) { showMessage('配置文件地址不要带 ? 或 # 参数', 'error'); return; }
+					} else if (subConfig) {
+						subConfig = '${SUB_CONFIG_BASE}' + subConfig;
+					}
 					var protocols = [];
 					document.querySelectorAll('.proto-pill input').forEach(function (cb) { if (cb.checked) protocols.push(cb.value); });
 					if (!protocols.length) { showMessage('请至少选择一个协议类型', 'error'); return; }
@@ -3488,6 +3570,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						fallbackTimeout: parseInt(document.getElementById('fallbackTimeout').value, 10) || 100,
 						bestIpApi: document.getElementById('bestIpApi').value.trim() || 'https://ipdb.api.030101.xyz/?type=bestcf',
 						subConvertBase: subConvertBase,
+						subConfig: subConfig,
 						autoUpdateBestIp: document.getElementById('autoUpdateBestIp').checked,
 						proxyApi: document.getElementById('proxyApi').value.trim(),
 						autoUpdateProxies: document.getElementById('autoUpdateProxies').checked,
@@ -3578,6 +3661,11 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					document.getElementById('toggleBestIpSettings').addEventListener('click', function () { togglePanel('bestIpSettings'); });
 					document.getElementById('toggleEchSettings').addEventListener('click', function () { togglePanel('echSettings'); });
 					document.getElementById('toggleProxyApiSettings').addEventListener('click', function () { togglePanel('proxyApiSettings'); });
+					document.getElementById('subConfig').addEventListener('change', function () {
+						var custom = document.getElementById('subConfigCustom');
+						custom.style.display = this.value === 'custom' ? 'block' : 'none';
+						if (this.value !== 'custom') custom.value = '';
+					});
 
 					document.getElementById('fetchBestIp').addEventListener('click', async function () {
 						var btn = this;
