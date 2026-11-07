@@ -116,6 +116,20 @@ const xhttpPadding=(req,header,key)=>{
     return new URL(req.url).searchParams.get(key)||"";
 };
 
+// 客户端测速/网络探测：明文 http、80 端口、已知的 204 探测地址，本地直接回
+// 这类请求本来就没有正文需求，走 ProxyIP 时更是根本到不了目标，本地回才不会一直显示 -1
+const LOCAL_204=new TextEncoder().encode("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+const PROBE_HOSTS=["cp.cloudflare.com","speed.cloudflare.com","www.gstatic.com","gstatic.com","connectivitycheck.gstatic.com","www.gstatic.cn","gstatic.cn","www.google.com","google.com","connect.rom.miui.com","captive.apple.com","www.msftconnecttest.com","www.msftncsi.com","detectportal.firefox.com","www.qualcomm.cn"];
+const isProbe204=(b)=>{
+    if(!b||b.byteLength<16||b.byteLength>4096) return false;
+    const head=new TextDecoder().decode(b.slice(0,Math.min(b.byteLength,1200)));
+    if(!/^(GET|HEAD) \S+ HTTP\/1\.[01]\r\n/i.test(head)) return false;
+    const m=/\r\nhost:[ \t]*([^\r\n:\s]+)/i.exec(head);
+    if(!m) return false;
+    const h=m[1].toLowerCase();
+    return PROBE_HOSTS.some((d)=>h===d||h.endsWith("."+d));
+};
+
 // ----------- 共享常量和工具 -----------
 const DEFAULT_UUID = "ef9d104e-ca0e-4202-ba4b-a0afb969c747";
 const TRANSPORTS = ["ws", "xhttp", "grpc"];
@@ -282,8 +296,10 @@ function splitHostPort(addr) {
 // 去掉 IPv6 方括号的 host
 const bareHost = (addr) => splitHostPort(addr).host.replace(/^\[|\]$/g, "");
 
-// ProxyIP 写法：host / host:port / [ipv6]:port；没带端口时沿用目标的端口
-function splitProxyIp(proxyIp, fallbackPort) {
+// ProxyIP 写法：host / host:port / [ipv6]:port
+// 没带端口时固定 443，不跟目标端口走：ProxyIP 是 443 上的反代，
+// 拿 80 去连它连不上，测速（走 http 80）就全变成 -1 了
+function splitProxyIp(proxyIp, fallbackPort = 443) {
     const s = String(proxyIp || "").trim();
     if (s.startsWith("[")) {
         const m = s.match(/^\[([^\]]+)\](?::(\d{1,5}))?$/);
@@ -2357,7 +2373,7 @@ const connectParallel=async(host,port,payload,order,mode,proxyCfg,proxyIp,getOrd
         try{
             if(type==="direct") return await connectDirect(host,port,payload);
             if(type==="s5"&&proxyCfg) return await tryConnectFn(proxyCfg,host,port,payload);
-            if(type==="proxy"&&proxyIp){const p=splitProxyIp(proxyIp,port);return await connectDirect(p.host,p.port,payload);}
+            if(type==="proxy"&&proxyIp){const p=splitProxyIp(proxyIp);return await connectDirect(p.host,p.port,payload);}
         }catch{}return null;
     };
     const tryNext=async(index)=>{if(index>=order.length) return null;const sock=await tryConnect(order[index]);return sock||(await tryNext(index+1));};
@@ -2474,7 +2490,7 @@ async function connectByOrder(head, opts, payload) {
         if (type === "direct") attempt = connectDirect(head.hostname, head.port, payload);
         else if (type === "s5" && opts.proxyConfig) attempt = connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
         else if (type === "proxy" && opts.PROXY_IP) {
-            const p = splitProxyIp(opts.PROXY_IP, head.port);
+            const p = splitProxyIp(opts.PROXY_IP);
             attempt = connectDirect(p.host, p.port, payload);
         }
         if (!attempt) continue;
@@ -2614,10 +2630,45 @@ async function handleTunnel(req, userConfig, opts, mode) {
     const sockPromise = connectByOrder(head, opts, headBuf.subarray(head.offset));
     sockPromise.then((s) => { if (cancelled && s) { try { s.close(); } catch {} } }).catch(() => {});
 
+    // 首包里没被头部吃掉的正文，后面直接跟着往上写
+    // 这段正文在 connectByOrder 建连时已经写进上游了，只有另外读到的那一包才算新数据
+    let leadBuf = headBuf.subarray(head.offset);
+    let leadFresh = false;
+    let leadP = null;
+    const probeWanted = !isGrpc && head.port === 80;
+    const getLead = () => {
+        if (!probeWanted || leadBuf.byteLength) return Promise.resolve(leadBuf);
+        if (!leadP) {
+            leadP = reader.read().then((s) => {
+                if (s.done || !s.value || !s.value.byteLength) return null;
+                leadBuf = new Uint8Array(s.value);
+                leadFresh = true;
+                return leadBuf;
+            }, () => null);
+        }
+        return leadP;
+    };
+    // 测速用的 204 探测本地回掉：走 ProxyIP 时这类明文探测本来也到不了目标，
+    // 一直连上游只会让客户端显示 -1。判断放在首包正文上，最多等 800ms
+    let probeHit = false;
+    const probeP = probeWanted
+        ? Promise.race([
+            getLead().then((b) => isProbe204(b)),
+            new Promise((r) => setTimeout(() => r(false), 800)),
+        ]).then((hit) => (probeHit = hit))
+        : Promise.resolve(false);
+
     // 下行：socket 可读流套壳后写进响应体；VLESS 要求先回 [版本号, 附加长度]，Trojan 不用
     const pumpDown = async (controller) => {
         try {
             if (!head.isTrojan) controller.enqueue(wrap(new Uint8Array([0, 0])));
+            if (await probeP) {
+                controller.enqueue(wrap(LOCAL_204));
+                cancelled = true;
+                try { reader.cancel(); } catch {}
+                try { controller.close(); } catch {}
+                return;
+            }
             const s = await sockPromise;
             if (!s) { try { controller.close(); } catch {} return; }
             sock = s;
@@ -2637,8 +2688,12 @@ async function handleTunnel(req, userConfig, opts, mode) {
         let w = null;
         try {
             const s = await sockPromise;
+            const first = await getLead();
+            if (probeHit) { try { reader.cancel(); } catch {} return; }
             if (!s) { try { reader.cancel(); } catch {} return; }
             w = s.writable.getWriter();
+            // 首包正文建连时已写过，只有额外读到的那一包要补写
+            if (leadFresh && first && first.byteLength) await w.write(first);
             for (;;) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -2972,7 +3027,7 @@ export default {
                                                     rawClientData,
                                                 );
                                             if (type === "proxy" && PROXY_IP) {
-                                                const p = splitProxyIp(PROXY_IP, port);
+                                                const p = splitProxyIp(PROXY_IP);
                                                 return await connectDirect(
                                                     p.host,
                                                     p.port,
