@@ -2439,16 +2439,47 @@ function parseXhttpHead(raw, uuid) {
 }
 
 // xhttp 与 gRPC 共用：按 t/d/s/p 决定的顺序连目标，首包一起带过去
+// 有备选时前一条路不能死等：直连被丢包会一直挂在 opened 上，
+// 客户端那边表现就是测速超时（延迟显示 -1），实际过几秒又能用。
+// 所以非最后一条尝试超过 1.5 秒就放手，让后面的接上；超时后才连上的连接要主动关掉
+const CONNECT_ATTEMPT_MS = 1500;
+function withConnectTimeout(promise, ms) {
+    if (!ms) return promise;
+    return new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            resolve(null);
+        }, ms);
+        promise.then((sock) => {
+            clearTimeout(timer);
+            if (settled) { try { sock && sock.close(); } catch {} return; }
+            settled = true;
+            resolve(sock);
+        }, () => {
+            clearTimeout(timer);
+            if (settled) return;
+            settled = true;
+            resolve(null);
+        });
+    });
+}
+
 async function connectByOrder(head, opts, payload) {
-    for (const type of opts.getOrder()) {
-        try {
-            if (type === "direct") return await connectDirect(head.hostname, head.port, payload);
-            if (type === "s5" && opts.proxyConfig) return await connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
-            if (type === "proxy" && opts.PROXY_IP) {
-                const p = splitProxyIp(opts.PROXY_IP, head.port);
-                return await connectDirect(p.host, p.port, payload);
-            }
-        } catch {}
+    const order = opts.getOrder();
+    for (let i = 0; i < order.length; i++) {
+        const type = order[i];
+        let attempt = null;
+        if (type === "direct") attempt = connectDirect(head.hostname, head.port, payload);
+        else if (type === "s5" && opts.proxyConfig) attempt = connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
+        else if (type === "proxy" && opts.PROXY_IP) {
+            const p = splitProxyIp(opts.PROXY_IP, head.port);
+            attempt = connectDirect(p.host, p.port, payload);
+        }
+        if (!attempt) continue;
+        const sock = await withConnectTimeout(attempt.catch(() => null), i === order.length - 1 ? 0 : CONNECT_ATTEMPT_MS);
+        if (sock) return sock;
     }
     return null;
 }
@@ -2577,15 +2608,20 @@ async function handleTunnel(req, userConfig, opts, mode) {
     // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
     if (head.state !== "ok" || head.isUDP) return reject(400);
 
-    // 目标由首包解出，按 t/d/s/p 决定的顺序逐个试，第一个连上就用它
-    sock = await connectByOrder(head, opts, headBuf.subarray(head.offset));
-    if (!sock) return reject(502);
+    // 目标由首包解出，按 t/d/s/p 决定的顺序逐个试，第一个连上就用它。
+    // 连接和握手解耦：握手立刻回，连接在流里等，直连慢或回退都不再拖慢客户端看到的握手时间
+    let cancelled = false;
+    const sockPromise = connectByOrder(head, opts, headBuf.subarray(head.offset));
+    sockPromise.then((s) => { if (cancelled && s) { try { s.close(); } catch {} } }).catch(() => {});
 
     // 下行：socket 可读流套壳后写进响应体；VLESS 要求先回 [版本号, 附加长度]，Trojan 不用
     const pumpDown = async (controller) => {
         try {
             if (!head.isTrojan) controller.enqueue(wrap(new Uint8Array([0, 0])));
-            const r = sock.readable.getReader();
+            const s = await sockPromise;
+            if (!s) { try { controller.close(); } catch {} return; }
+            sock = s;
+            const r = s.readable.getReader();
             for (;;) {
                 const { done, value } = await r.read();
                 if (done) break;
@@ -2593,14 +2629,16 @@ async function handleTunnel(req, userConfig, opts, mode) {
             }
         } catch {}
         try { controller.close(); } catch {}
-        try { sock.close(); } catch {}
+        try { sock && sock.close(); } catch {}
     };
 
     // 上行：请求体继续灌进 socket，读完只关写端，不影响下行
     (async () => {
         let w = null;
         try {
-            w = sock.writable.getWriter();
+            const s = await sockPromise;
+            if (!s) { try { reader.cancel(); } catch {} return; }
+            w = s.writable.getWriter();
             for (;;) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -2615,12 +2653,14 @@ async function handleTunnel(req, userConfig, opts, mode) {
     const tag = isGrpc ? null : xhttpTag(userConfig && userConfig.uuid);
     return new Response(new ReadableStream({
         start(controller) { pumpDown(controller); },
-        cancel() { try { sock.close(); } catch {} },
+        cancel() {
+            cancelled = true;
+            try { sock && sock.close(); } catch {}
+        },
     }), {
         status: 200,
         headers: {
             "content-type": isGrpc ? "application/grpc" : "application/octet-stream",
-            ...(isGrpc ? { "grpc-status": "0" } : {}),
             ...(tag ? { [tag[0]]: `https://x.invalid/?${tag[1]}=${randPad(120 + Math.floor(Math.random() * 780))}` } : {}),
             "cache-control": "no-store",
             "x-accel-buffering": "no",
