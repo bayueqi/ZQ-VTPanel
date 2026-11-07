@@ -83,7 +83,7 @@ const b64urlDec=(s)=>{
 };
 const randStr=()=>Math.random().toString(36).slice(2,8);
 const paths=["/static/js","/assets/img","/api/2024","/cdn/file","/upload/data","/media/v2","/lib/ext","/res/now","/stat/click","/track/log","/api/v1/data","/css/main","/js/app","/fonts/google","/images/hero","/videos/intro","/api/v2/user","/assets/css","/static/media","/build/js","/dist/css","/public/img","/content/data","/files/doc","/download/pkg","/api/v3/item","/resource/img"];
-const paramsMap={t:["m","type","mode"],d:["dir","direct","d"],s:["socks","proxy","s"],p:["ip","proxyip","p"],v:["r","rand","v","id","t"]};
+const paramsMap={t:["m","type","mode"],d:["dir","direct","d"],s:["socks","proxy","s"],p:["ip","proxyip","p"],v:["r","rand","v","id"]};
 const getPath=()=>paths[Math.floor(Math.random()*paths.length)];
 const getParam=(key)=>paramsMap[key][Math.floor(Math.random()*paramsMap[key].length)];
 
@@ -114,20 +114,6 @@ const xhttpPadding=(req,header,key)=>{
         return raw;
     }
     return new URL(req.url).searchParams.get(key)||"";
-};
-
-// 客户端测速/网络探测：明文 http、80 端口、已知的 204 探测地址，本地直接回
-// 这类请求本来就没有正文需求，走 ProxyIP 时更是根本到不了目标，本地回才不会一直显示 -1
-const LOCAL_204=new TextEncoder().encode("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-const PROBE_HOSTS=["cp.cloudflare.com","speed.cloudflare.com","www.gstatic.com","gstatic.com","connectivitycheck.gstatic.com","www.gstatic.cn","gstatic.cn","www.google.com","google.com","connect.rom.miui.com","captive.apple.com","www.msftconnecttest.com","www.msftncsi.com","detectportal.firefox.com","www.qualcomm.cn"];
-const isProbe204=(b)=>{
-    if(!b||b.byteLength<16||b.byteLength>4096) return false;
-    const head=new TextDecoder().decode(b.slice(0,Math.min(b.byteLength,1200)));
-    if(!/^(GET|HEAD) \S+ HTTP\/1\.[01]\r\n/i.test(head)) return false;
-    const m=/\r\nhost:[ \t]*([^\r\n:\s]+)/i.exec(head);
-    if(!m) return false;
-    const h=m[1].toLowerCase();
-    return PROBE_HOSTS.some((d)=>h===d||h.endsWith("."+d));
 };
 
 // ----------- 共享常量和工具 -----------
@@ -297,18 +283,17 @@ function splitHostPort(addr) {
 const bareHost = (addr) => splitHostPort(addr).host.replace(/^\[|\]$/g, "");
 
 // ProxyIP 写法：host / host:port / [ipv6]:port
-// 没带端口时固定 443，不跟目标端口走：ProxyIP 是 443 上的反代，
-// 拿 80 去连它连不上，测速（走 http 80）就全变成 -1 了
-function splitProxyIp(proxyIp, fallbackPort = 443) {
+// 未写端口时固定 443：它是 443 上的反代服务，按目标端口去连多数连不上
+function splitProxyIp(proxyIp) {
     const s = String(proxyIp || "").trim();
     if (s.startsWith("[")) {
         const m = s.match(/^\[([^\]]+)\](?::(\d{1,5}))?$/);
-        if (m) return { host: m[1], port: m[2] ? Number(m[2]) : fallbackPort };
+        if (m) return { host: m[1], port: m[2] ? Number(m[2]) : 443 };
     }
     const i = s.lastIndexOf(":");
     if (i > 0 && s.indexOf(":") === i && /^\d{1,5}$/.test(s.slice(i + 1)))
         return { host: s.slice(0, i), port: Number(s.slice(i + 1)) };
-    return { host: s, port: fallbackPort };
+    return { host: s, port: 443 };
 }
 
 // 去重键：host:port，域名不分大小写，避免 1.2.3.4 与 1.2.3.4:443 生成两个同样的节点
@@ -839,12 +824,16 @@ function resolveRoute(u){
         }
         return null;
     };
-    const mode=({d:"direct",s:"s5",p:"parallel"})[pick(["t","m","type","mode"])]||"parallel";
+    const tval=pick(["t","m","type","mode"]);
+    const mode=({d:"direct",s:"s5",p:"parallel"})[tval]||"parallel";
     const s5Param=pick(["s","socks","proxy"]);
     const proxyParam=pick(["p","ip","proxyip"]);
     const proxyConfig=s5Param?parseProxyAddress(s5Param):null;
     const PROXY_IP=proxyParam?String(proxyParam):null;
     const getOrder=()=>{
+        // t 已经写明回退方式时按它走，不去猜查询键的顺序
+        if(tval==="dp") return PROXY_IP?["direct","proxy"]:["direct"];
+        if(tval==="ds") return proxyConfig?["direct","s5"]:["direct"];
         if(mode==="s5") return ["s5"];
         const order=[];
         for(const pair of u.search.slice(1).split("&")){
@@ -2466,31 +2455,40 @@ function parseXhttpHead(raw, uuid) {
 }
 
 // xhttp 与 gRPC 共用：按 t/d/s/p 决定的顺序连目标，首包一起带过去。
-// 建连靠并发：同一跳同时拨两路，谁先连上就用谁，其余立刻关掉。
-// 单路串行时，被丢包的那一路会一直挂在 opened 上，客户端等不到回包就是 -1；
-// 有备选时一次尝试只给 1 秒，超时就换下一跳（直连 / ProxyIP / 其它代理）
-const CONNECT_ATTEMPT_MS = 1000;
-const DIAL_PARALLEL = 2;
+// 建连成功不等于这条路能用：优选 IP 的 443 几乎谁都能连上，真正决定通不通的是
+// 连上之后有没有数据回来。所以每一跳都先拨号、再等首块下行数据，等不到就换下一跳
+// （直连 → ProxyIP / 其它代理），全部走完才算失联。
+const DIAL_TIMEOUT_MS = 4000;
 
-function dialRace(make, parallel, ms) {
-    return new Promise((resolve) => {
-        let settled = false;
-        let pending = parallel;
-        const settle = (sock) => {
-            if (settled) { if (sock) { try { sock.close(); } catch {} } return; }
-            settled = true;
-            clearTimeout(timer);
-            resolve(sock || null);
-        };
-        const timer = setTimeout(() => settle(null), ms);
-        for (let i = 0; i < parallel; i++) {
-            make().then(
-                (sock) => settle(sock),
-                () => { if (!settled && --pending === 0) settle(null); },
-            );
-        }
+const dial = (make, ms) =>
+    new Promise((resolve) => {
+        let done = false;
+        const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            resolve(null);
+        }, ms);
+        make().then(
+            (sock) => {
+                if (done) { try { sock.close(); } catch {} return; }
+                done = true;
+                clearTimeout(timer);
+                resolve(sock);
+            },
+            () => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                resolve(null);
+            },
+        );
     });
-}
+
+const waitRead = (reader, ms) =>
+    Promise.race([
+        reader.read().catch(() => ({ done: true })),
+        new Promise((r) => setTimeout(() => r(null), ms)),
+    ]);
 
 const dialerFor = (type, head, opts, payload) => {
     if (type === "direct") return () => connectDirect(head.hostname, head.port, payload);
@@ -2502,15 +2500,18 @@ const dialerFor = (type, head, opts, payload) => {
     return null;
 };
 
-async function connectByOrder(head, opts, payload) {
-    const order = opts.getOrder();
-    for (let i = 0; i < order.length; i++) {
-        const make = dialerFor(order[i], head, opts, payload);
-        if (!make) continue;
-        // 最后一跳没有备选，多给点时间；前面的跳只为抢时间，超时就往下走
-        const last = i === order.length - 1;
-        const sock = await dialRace(make, last ? 1 : DIAL_PARALLEL, last ? 8000 : CONNECT_ATTEMPT_MS);
-        if (sock) return sock;
+// 最后一条路没有备选，直接交出去让下行流自己等，不让它白白多等一轮
+async function openRoute(head, opts, payload, waitMs) {
+    const plans = opts.getOrder().map((t) => dialerFor(t, head, opts, payload)).filter(Boolean);
+    for (let i = 0; i < plans.length; i++) {
+        const sock = await dial(plans[i], DIAL_TIMEOUT_MS);
+        if (!sock) continue;
+        const reader = sock.readable.getReader();
+        if (i === plans.length - 1) return { sock, reader, first: null };
+        const step = await waitRead(reader, waitMs);
+        if (step && step.value && step.value.byteLength) return { sock, reader, first: step.value };
+        try { reader.cancel(); } catch {}
+        try { sock.close(); } catch {}
     }
     return null;
 }
@@ -2644,23 +2645,14 @@ async function handleTunnel(req, userConfig, opts, mode) {
     // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
     if (head.state !== "ok" || head.isUDP) return reject(400);
 
-    // 目标由首包解出，按 t/d/s/p 决定的顺序逐个试，第一个连上就用它。
-    // 连接和握手解耦：握手立刻回，连接在流里等，直连慢或回退都不再拖慢客户端看到的握手时间
-    let cancelled = false;
-    const sockPromise = connectByOrder(head, opts, headBuf.subarray(head.offset));
-    sockPromise.then((s) => { if (cancelled && s) { try { s.close(); } catch {} } }).catch(() => {});
+    // 首包里没被头部吃掉的正文，每条候选连接都要原样再发一次
+    const payload = headBuf.subarray(head.offset);
+    // 每一跳等首块下行数据的时间：太短healthy 的直连也会被误判，太长又不通的那跳白等
+    const waitMs = Math.max(300, Math.min(5000, userConfig.fallbackTimeout || 100));
+    // 握手不等建连：先回响应头，连接和回退都在流里跑
+    const route = openRoute(head, opts, payload, waitMs);
 
-    // 首包里没被头部吃掉的正文，建连时已经跟着首包写进上游了，这里只作探测样本
-    const leadBuf = headBuf.subarray(head.offset);
-
-    // 测速用的明文探测（http + 常见 204 地址）本地直接回。
-    // 这类请求走 ProxyIP 时没有 SNI 可供转发，本来也到不了目标，
-    // 硬等上游只会让客户端卡到超时，表现就是延迟 -1
-    const probeHit = head.port === 80 && isProbe204(leadBuf);
-    if (probeHit) cancelled = true;
-
-    // 下行直通：用 IdentityTransformStream 透传，写完立刻出流。
-    // 用普通 ReadableStream 攒包会让客户端迟迟收不到首字节，测速就显示 -1
+    // 下行走直通管道，写完就出流；普通 ReadableStream 会先把包攒住，首字节出不来
     const pump = makePipe();
     (async () => {
         const w = pump.writable.getWriter();
@@ -2668,16 +2660,12 @@ async function handleTunnel(req, userConfig, opts, mode) {
         try {
             // VLESS 要求先回 [版本号, 附加长度]，Trojan 不用
             if (!head.isTrojan) await put(wrap(new Uint8Array([0, 0])));
-            if (probeHit) {
-                await put(wrap(LOCAL_204));
-                return;
-            }
-            const s = await sockPromise;
-            if (!s) return;
-            sock = s;
-            const r = s.readable.getReader();
+            const r = await route;
+            if (!r) return;
+            sock = r.sock;
+            if (r.first) await put(wrap(r.first));
             for (;;) {
-                const { done, value } = await r.read();
+                const { done, value } = await r.reader.read();
                 if (done) break;
                 if (value && value.byteLength) await put(wrap(value));
             }
@@ -2690,10 +2678,9 @@ async function handleTunnel(req, userConfig, opts, mode) {
     (async () => {
         let w = null;
         try {
-            if (probeHit) { try { reader.cancel(); } catch {} return; }
-            const s = await sockPromise;
-            if (!s) { try { reader.cancel(); } catch {} return; }
-            w = s.writable.getWriter();
+            const r = await route;
+            if (!r) { try { reader.cancel(); } catch {} return; }
+            w = r.sock.writable.getWriter();
             for (;;) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -2731,8 +2718,6 @@ export default {
             return `${getPath()}?${params.join("&")}`;
         };
 
-        // 隧道传输（xhttp / gRPC）把回退方式写进路径段：/d、/p-<base64url>、/s-<base64url>
-        // xhttp 开了混淆后查询串会被客户端整段搬进请求头，模式放 query 服务端就取不到了
         // 隧道传输（xhttp / gRPC）把回退方式写进路径段：
         // d = 只直连，p-/s- = 只走 ProxyIP / 其它代理，dp-/ds- = 先直连，失败再回退
         const routeSeg = (t, p, s) => {
