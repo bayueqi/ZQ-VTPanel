@@ -3902,7 +3902,8 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 				function syncGrpcFields() {
 					var sel = (document.querySelector('.trans-pill input:checked') || {}).value;
 					document.querySelectorAll('.grpc-only').forEach(function (el) {
-						el.style.display = sel === 'grpc' ? '' : 'none';
+						// 置空样式会退回 CSS 的 display:none，必须显式给 block
+						el.style.display = sel === 'grpc' ? 'block' : 'none';
 					});
 				}
 
