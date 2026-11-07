@@ -4,6 +4,8 @@
 
 一个跑在 Cloudflare Workers 上的 VLESS / Trojan 节点面板。`_worker.js` 是核心（隧道、订阅分发、接口），`docs/` 是管理界面（静态页，由核心反代），两部分独立部署、互不影响。
 
+仓库另附 `jkpanel.js`，整份代码单独部署成一个 Worker 即可运行，不依赖上面两个文件。
+
 ## 功能
 
 - 面板三大块：订阅链接 / 基础配置 / 节点配置，毛玻璃动效界面，移动端自适应
@@ -24,8 +26,6 @@
 1. 仓库 **Settings** → **Pages**
 2. **Source** 选择 **Deploy from a branch**，分支 `main`，目录 `/docs`，保存
 3. 等待发布完成，得到访问地址
-
-也可以改用仓库里的 `jkpanel.js`，整份代码单独部署成一个 Worker，其余步骤相同。
 
 `_worker.js` 的默认面板地址是 `https://jkpanel.vpnjk.cc.cd`。面板地址与此不同时，部署核心 Worker 时用环境变量 `PANEL_URL` 指定。
 
