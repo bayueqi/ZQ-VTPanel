@@ -11,6 +11,7 @@
 - 其它代理支持 socks5 / http / https / sstp / turn
 - 全局开关：只走代理，或直连失败回退
 - VLESS / Trojan 独立或同时出订阅，自动识别 Clash / Sing-Box / Surge 并调用 subconverter 转换
+- 传输类型可选 WebSocket / XHTTP
 - ECH 加密、回退检测时间、优选IP 与其它代理自动拉取
 - 密码登录鉴权，路径与参数伪装混淆
 
@@ -65,6 +66,7 @@
 | 密码 | 面板登录凭据，默认 `admin`，登录后修改 |
 | UUID | 节点凭据，也是订阅链接凭据 |
 | 协议类型 | VLESS / Trojan，至少选一个 |
+| 传输类型 | WebSocket 或 XHTTP，默认 WebSocket。XHTTP 需要客户端支持（mihomo 1.19.22 起、Xray 系新版）；Sing-Box / Surge / Loon / Quantumult X 的订阅自动按 WebSocket 输出 |
 | 订阅转换服务 | subconverter 服务根地址（ZQ-SubApi 即这一层），留空用内置默认；可用环境变量 `SUBCONVERTER_BASE` 指定 |
 | 订阅转换配置文件 | ACL4SSR 规则预设或自填 `.ini` 地址，仅对 Clash 订阅生效；选「不使用」则用服务端默认规则 |
 | ECH | 加密 SNI 绕过 DNS 污染；「高级」里可改 SNI 与 DoH 地址 |

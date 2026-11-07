@@ -702,6 +702,47 @@ function proxyTypeLabel(address){
     return ({socks5:"SOCKS5",http:"HTTP",https:"HTTPS",sstp:"SSTP",turn:"TURN"})[config.type]||config.type.toUpperCase();
 }
 
+// 部分客户端把 path 里的 "?" 编码成 %3F，解析前还原成查询串
+function normalizeQueryPath(u){
+    if(!u.pathname.includes("%3F")) return u;
+    const decoded=decodeURIComponent(u.pathname);
+    const index=decoded.indexOf("?");
+    if(index!==-1){
+        u.search=decoded.slice(index);
+        u.pathname=decoded.slice(0,index);
+    }
+    return u;
+}
+
+// ws 与 xhttp 共用：按路径里的 t/d/s/p 决定直连、socks、ProxyIP 的尝试顺序
+function resolveRoute(u){
+    const pick=(keys)=>{
+        for(const k of keys){
+            const v=u.searchParams.get(k);
+            if(v!==null) return v;
+        }
+        return null;
+    };
+    const mode=({d:"direct",s:"s5",p:"parallel"})[pick(["t","m","type","mode"])]||"parallel";
+    const s5Param=pick(["s","socks","proxy"]);
+    const proxyParam=pick(["p","ip","proxyip"]);
+    const proxyConfig=s5Param?parseProxyAddress(s5Param):null;
+    const PROXY_IP=proxyParam?String(proxyParam):null;
+    const getOrder=()=>{
+        if(mode==="s5") return ["s5"];
+        const order=[];
+        for(const pair of u.search.slice(1).split("&")){
+            const key=pair.split("=")[0];
+            if(["d","dir","direct"].includes(key)) order.push("direct");
+            if(["s","socks","proxy"].includes(key)) order.push("s5");
+            if(["p","ip","proxyip"].includes(key)) order.push("proxy");
+        }
+        if(order.length===0&&PROXY_IP) return ["proxy","direct"];
+        return order.length?order:["direct"];
+    };
+    return {mode,proxyConfig,PROXY_IP,getOrder};
+}
+
 async function socks5Connect(socket,proxyConfig,targetHost,targetPort,timeoutMs){
     const writer=socket.writable.getWriter(),reader=socket.readable.getReader();
     try{
@@ -2193,7 +2234,17 @@ async function connectViaProxy(proxyConfig,targetHost,targetPort,initialData){
     return socket;
 }
 
-const connectDirect=async(hostname,portNum,data)=>{const sock=connect({hostname,port:portNum});await sock.opened;const w=sock.writable.getWriter();await w.write(data);w.releaseLock();return sock;};
+const connectDirect=async(hostname,portNum,data)=>{
+    const sock=connect({hostname,port:portNum});
+    await sock.opened;
+    // 首包可能刚好被头部吃光，空数据不写，避免零长度写入报错
+    if(data&&data.byteLength){
+        const w=sock.writable.getWriter();
+        await w.write(data);
+        w.releaseLock();
+    }
+    return sock;
+};
 const connectStreams=async(remoteSocket,webSocket,headerData,retryFunc,userCfg)=>{
     let header=headerData,hasData=false,dataPromiseResolve;
     const dataPromise=new Promise((resolve)=>(dataPromiseResolve=resolve));
@@ -2230,177 +2281,142 @@ const connectParallel=async(host,port,payload,order,mode,proxyCfg,proxyIp,getOrd
 };
 
 // ---------- XHTTP（stream-one）----------
-// 上行是连续字节流，首包可能跨 chunk：数据不够返回 need，解析失败返回 bad
+// 地址字段：VLESS 的 atyp（1=ipv4,2=域名,3=ipv6）和 Trojan（1=ipv4,3=域名,4=ipv6）编号不同，先统一成类型名
+const XHTTP_ATYP = { vless: { 1: "ipv4", 2: "domain", 3: "ipv6" }, trojan: { 1: "ipv4", 3: "domain", 4: "ipv6" } };
+function readXhttpAddr(b, pos, kind) {
+    if (kind === "ipv4") {
+        if (b.byteLength < pos + 4) return null;
+        return { addr: `${b[pos]}.${b[pos + 1]}.${b[pos + 2]}.${b[pos + 3]}`, pos: pos + 4 };
+    }
+    if (kind === "domain") {
+        if (b.byteLength < pos + 1) return null;
+        const len = b[pos];
+        if (b.byteLength < pos + 1 + len) return null;
+        return { addr: new TextDecoder().decode(b.slice(pos + 1, pos + 1 + len)), pos: pos + 1 + len };
+    }
+    if (b.byteLength < pos + 16) return null;
+    const dv = new DataView(b.buffer, b.byteOffset + pos, 16), parts = [];
+    for (let i = 0; i < 8; i++) parts.push(dv.getUint16(i * 2).toString(16));
+    return { addr: parts.join(":"), pos: pos + 16 };
+}
+
+const isHexByte = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+
+// 上行是连续字节流，首包可能被切在两个 chunk 之间：数据不够返回 need，确定不是本协议返回 bad
 function parseXhttpHead(raw, uuid) {
     const b = new Uint8Array(raw);
-    const need = () => ({ state: "need" });
-    const bad = () => ({ state: "bad" });
+    const need = { state: "need" }, bad = { state: "bad" };
+    if (!b.byteLength) return need;
+
+    // 首字节定协议：VLESS 版本号固定 0，Trojan 口令首字符是十六进制
+    if (b[0] === 0) {
+        // VLESS：ver + uuid(16) + optLen + opt + cmd + port + atyp + addr
+        if (b.byteLength < 17) return need;
+        const hex = uuid.replace(/-/g, "").toLowerCase();
+        for (let i = 0; i < 16; i++) {
+            if (b[1 + i].toString(16).padStart(2, "0") !== hex.substr(i * 2, 2)) return bad;
+        }
+        if (b.byteLength < 18) return need;
+        let pos = 18 + b[17];
+        if (b.byteLength < pos + 3) return need;
+        const cmd = b[pos], port = (b[pos + 1] << 8) | b[pos + 2];
+        if (cmd !== 1 && cmd !== 2) return bad;
+        pos += 3;
+        if (b.byteLength < pos + 1) return need;
+        const kind = XHTTP_ATYP.vless[b[pos]];
+        if (!kind) return bad;
+        const r = readXhttpAddr(b, pos + 1, kind);
+        if (!r) return need;
+        return { state: "ok", isTrojan: false, hostname: r.addr, port, isUDP: cmd === 2, offset: r.pos };
+    }
 
     // Trojan：56 位十六进制口令 + CRLF + cmd + atyp + addr + port + CRLF
-    if (b.byteLength >= 56) {
-        let hexOk = true;
-        for (let i = 0; i < 56; i++) {
-            const c = b[i];
-            if (!((c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102))) { hexOk = false; break; }
-        }
-        if (hexOk) {
-            if (b.byteLength < 58) return need();
-            if (b[56] !== 0x0d || b[57] !== 0x0a) return bad();
-            if (new TextDecoder().decode(b.slice(0, 56)).toLowerCase() !== trojanpwd(uuid).toLowerCase()) return bad();
-            let pos = 58;
-            if (b.byteLength < pos + 2) return need();
-            const cmd = b[pos], at = b[pos + 1];
-            if (cmd !== 1 && cmd !== 3) return bad();
-            pos += 2;
-            let addr;
-            if (at === 1) {
-                if (b.byteLength < pos + 4) return need();
-                addr = `${b[pos]}.${b[pos + 1]}.${b[pos + 2]}.${b[pos + 3]}`;
-                pos += 4;
-            } else if (at === 3) {
-                if (b.byteLength < pos + 1) return need();
-                const len = b[pos];
-                pos += 1;
-                if (b.byteLength < pos + len) return need();
-                addr = new TextDecoder().decode(b.slice(pos, pos + len));
-                pos += len;
-            } else if (at === 4) {
-                if (b.byteLength < pos + 16) return need();
-                const dv = new DataView(b.buffer, b.byteOffset + pos, 16);
-                const ip6 = [];
-                for (let i = 0; i < 8; i++) ip6.push(dv.getUint16(i * 2).toString(16));
-                addr = ip6.join(":");
-                pos += 16;
-            } else return bad();
-            if (b.byteLength < pos + 2) return need();
-            const port = (b[pos] << 8) | b[pos + 1];
-            pos += 2;
-            if (b.byteLength < pos + 2) return need();
-            if (b[pos] !== 0x0d || b[pos + 1] !== 0x0a) return bad();
-            pos += 2;
-            return { state: "ok", isTrojan: true, hostname: addr, port, isUDP: cmd === 3, offset: pos };
-        }
+    for (let i = 0, n = Math.min(b.byteLength, 56); i < n; i++) {
+        if (!isHexByte(b[i])) return bad;
     }
-
-    // VLESS：ver + uuid + optLen + opt + cmd + port + atyp + addr
-    if (b.byteLength < 1) return need();
-    if (b[0] !== 0) return bad();
-    if (b.byteLength < 17) return need();
-    const uuidHex = uuid.replace(/-/g, "").toLowerCase();
-    for (let i = 0; i < 16; i++) {
-        if (b[1 + i].toString(16).padStart(2, "0") !== uuidHex.substr(i * 2, 2)) return bad();
-    }
-    if (b.byteLength < 18) return need();
-    let pos = 18 + b[17];
-    if (b.byteLength < pos + 1) return need();
-    const cmd = b[pos];
-    pos += 1;
-    if (cmd !== 1 && cmd !== 2) return bad();
-    if (b.byteLength < pos + 2) return need();
-    const port = (b[pos] << 8) | b[pos + 1];
-    pos += 2;
-    if (b.byteLength < pos + 1) return need();
-    const at = b[pos];
-    pos += 1;
-    let addr;
-    if (at === 1) {
-        if (b.byteLength < pos + 4) return need();
-        addr = `${b[pos]}.${b[pos + 1]}.${b[pos + 2]}.${b[pos + 3]}`;
-        pos += 4;
-    } else if (at === 2) {
-        if (b.byteLength < pos + 1) return need();
-        const len = b[pos];
-        pos += 1;
-        if (b.byteLength < pos + len) return need();
-        addr = new TextDecoder().decode(b.slice(pos, pos + len));
-        pos += len;
-    } else if (at === 3) {
-        if (b.byteLength < pos + 16) return need();
-        const dv = new DataView(b.buffer, b.byteOffset + pos, 16);
-        const ip6 = [];
-        for (let i = 0; i < 8; i++) ip6.push(dv.getUint16(i * 2).toString(16));
-        addr = ip6.join(":");
-        pos += 16;
-    } else return bad();
-    return { state: "ok", isTrojan: false, hostname: addr, port, isUDP: cmd === 2, offset: pos };
+    if (b.byteLength < 60) return need;
+    if (b[56] !== 0x0d || b[57] !== 0x0a) return bad;
+    if (new TextDecoder().decode(b.slice(0, 56)).toLowerCase() !== trojanpwd(uuid).toLowerCase()) return bad;
+    const cmd = b[58], at = b[59];
+    if (cmd !== 1 && cmd !== 3) return bad;
+    const kind = XHTTP_ATYP.trojan[at];
+    if (!kind) return bad;
+    const r = readXhttpAddr(b, 60, kind);
+    if (!r) return need;
+    if (b.byteLength < r.pos + 4) return need;
+    const port = (b[r.pos] << 8) | b[r.pos + 1];
+    if (b[r.pos + 2] !== 0x0d || b[r.pos + 3] !== 0x0a) return bad;
+    return { state: "ok", isTrojan: true, hostname: r.addr, port, isUDP: cmd === 3, offset: r.pos + 4 };
 }
 
 // 一个 POST 承载上下行：请求体灌进 socket，socket 的可读流直接当响应体吐出去
 async function handleXhttp(req, userConfig, opts) {
     if (!req.body) return new Response("bad request", { status: 400 });
     const reader = req.body.getReader();
-    const abort = () => { try { reader.cancel().catch(() => {}); } catch {} };
+    const fail = (status) => {
+        reader.cancel().catch(() => {});
+        return new Response("bad request", { status });
+    };
 
-    let buf = new Uint8Array(0);
-    let head = null;
-    while (true) {
+    // 攒够首包才建连；头部跨 chunk 时 parseXhttpHead 会回 need
+    let buf = new Uint8Array(0), head = { state: "need" };
+    while (head.state === "need") {
         const { done, value } = await reader.read();
         if (done) break;
-        buf = buf.byteLength ? concatBytes(buf, new Uint8Array(value)) : new Uint8Array(value);
+        if (value && value.byteLength) buf = buf.byteLength ? concatBytes(buf, value) : new Uint8Array(value);
+        if (buf.byteLength > 16384) return fail(400);
         head = parseXhttpHead(buf, userConfig.uuid);
-        if (head.state !== "need") break;
-        if (buf.byteLength > 16384) { abort(); return new Response("bad request", { status: 400 }); }
     }
-    if (!head || head.state !== "ok") { abort(); return new Response("bad request", { status: 400 }); }
-    // UDP 走不了这条链路，直接拒，客户端会自己回落 TCP
-    if (head.isUDP) { abort(); return new Response("udp not supported", { status: 400 }); }
+    // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
+    if (head.state !== "ok" || head.isUDP) return fail(400);
 
-    const payload = buf.slice(head.offset);
-    const order = opts.getOrder();
-    const tryConnect = async (type) => {
+    const payload = buf.subarray(head.offset);
+    let sock = null;
+    for (const type of opts.getOrder()) {
         try {
-            if (type === "direct") return await connectDirect(head.hostname, head.port, payload);
-            if (type === "s5" && opts.proxyConfig) return await connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
-            if (type === "proxy" && opts.PROXY_IP) {
-                const [ph, pp] = opts.PROXY_IP.split(":");
-                return await connectDirect(ph, +pp || head.port, payload);
+            if (type === "direct") sock = await connectDirect(head.hostname, head.port, payload);
+            else if (type === "s5" && opts.proxyConfig) sock = await connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
+            else if (type === "proxy" && opts.PROXY_IP) {
+                const [ph, pp = head.port] = opts.PROXY_IP.split(":");
+                sock = await connectDirect(ph, +pp || head.port, payload);
             }
         } catch {}
-        return null;
-    };
-    let sock = null;
-    for (const type of order) {
-        sock = await tryConnect(type);
         if (sock) break;
     }
-    if (!sock) { abort(); return new Response("bad gateway", { status: 502 }); }
+    if (!sock) return fail(502);
 
-    // VLESS 要求首包回一个 [版本号, 附加长度]；Trojan 不需要
-    const respHead = head.isTrojan ? null : new Uint8Array([0, 0]);
-    const down = typeof IdentityTransformStream !== "undefined" ? new IdentityTransformStream() : new TransformStream();
-    const dw = down.writable.getWriter();
-    const sw = sock.writable.getWriter();
-
-    // 上行：请求体灌进 socket；请求体读完只关 socket 的写端，不能连带关掉下行
+    // 上行：剩下的请求体继续灌进 socket，读完只关写端，不影响下行
     (async () => {
+        const w = sock.writable.getWriter();
         try {
-            while (true) {
+            for (;;) {
                 const { done, value } = await reader.read();
                 if (done) break;
-                if (value && value.byteLength) await sw.write(value);
+                if (value && value.byteLength) await w.write(value);
             }
         } catch {}
-        try { reader.releaseLock(); } catch {}
-        try { await sw.close(); } catch {}
+        try { await w.close(); } catch {}
     })();
 
-    // 下行：socket 可读流写进响应体，读完才关响应
-    (async () => {
-        const dr = sock.readable.getReader();
-        try {
-            if (respHead) await dw.write(respHead);
-            while (true) {
-                const { done, value } = await dr.read();
-                if (done) break;
-                if (value && value.byteLength) await dw.write(value);
-            }
-        } catch {}
-        try { dr.releaseLock(); } catch {}
-        try { await dw.close(); } catch {}
-        try { await sw.close(); } catch {}
-    })();
+    // 下行：socket 可读流写进响应体。VLESS 要求先回 [版本号, 附加长度]，Trojan 不用
+    const respHead = head.isTrojan ? null : new Uint8Array([0, 0]);
+    const body = new ReadableStream({
+        async start(controller) {
+            if (respHead) controller.enqueue(respHead);
+            const r = sock.readable.getReader();
+            try {
+                for (;;) {
+                    const { done, value } = await r.read();
+                    if (done) break;
+                    if (value && value.byteLength) controller.enqueue(value);
+                }
+            } catch {}
+            try { controller.close(); } catch {}
+        },
+        cancel() { try { sock.close(); } catch {} },
+    });
 
-    return new Response(down.readable, {
+    return new Response(body, {
         status: 200,
         headers: {
             "content-type": "application/octet-stream",
@@ -2472,50 +2488,13 @@ export default {
         };
 
         if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-            const u = new URL(req.url);
+            const u = normalizeQueryPath(new URL(req.url));
             const userConfig = await getUserConfig(env);
             const [client, ws] = Object.values(new WebSocketPair());
             ws.accept();
             ws.binaryType = 'arraybuffer';
 
-            if (u.pathname.includes("%3F")) {
-                const decoded = decodeURIComponent(u.pathname);
-                const queryIndex = decoded.indexOf("?");
-                if (queryIndex !== -1) {
-                    u.search = decoded.slice(queryIndex);
-                    u.pathname = decoded.slice(0, queryIndex);
-                }
-            }
-
-            const getParamValue = (keys) => {
-                for (const k of keys) {
-                    const v = u.searchParams.get(k);
-                    if (v !== null) return v;
-                }
-                return null;
-            };
-            const modeMap = { d: "direct", s: "s5", p: "parallel" };
-            const modeVal = getParamValue(["t", "m", "type", "mode"]);
-            const mode = modeMap[modeVal] || "parallel";
-            const s5Param = getParamValue(["s", "socks", "proxy"]);
-            const proxyParam = getParamValue(["p", "ip", "proxyip"]);
-            // parseProxyAddress 已覆盖 带协议前缀 / user:pass@host:port / host:port 全部格式，无需兜底
-            const proxyConfig = s5Param ? parseProxyAddress(s5Param) : null;
-            const PROXY_IP = proxyParam ? String(proxyParam) : null;
-
-            const getOrder = () => {
-                if (mode === "s5") return ["s5"];
-                const order = [];
-                const params = u.search.slice(1).split("&");
-                for (const pair of params) {
-                    const key = pair.split("=")[0];
-                    if (["d", "dir", "direct"].includes(key)) order.push("direct");
-                    if (["s", "socks", "proxy"].includes(key)) order.push("s5");
-                    if (["p", "ip", "proxyip"].includes(key)) order.push("proxy");
-                }
-                if (order.length === 0 && PROXY_IP) return ["proxy", "direct"];
-                return order.length ? order : ["direct"];
-            };
+            const { mode, proxyConfig, PROXY_IP, getOrder } = resolveRoute(u);
 
             let remote = null,
                 udpWriter = null,
@@ -2863,37 +2842,11 @@ export default {
             return new Response(null, { status: 101, webSocket: client });
         }
 
-        const url = new URL(req.url);
+        const url = normalizeQueryPath(new URL(req.url));
 
         // XHTTP：POST 到 paths 里的伪装路径，一个请求同时承载上行和下行
         if (req.method === "POST" && req.body && paths.includes(url.pathname)) {
-            const userConfig = await getUserConfig(env);
-            const getParamValue = (keys) => {
-                for (const k of keys) {
-                    const v = url.searchParams.get(k);
-                    if (v !== null) return v;
-                }
-                return null;
-            };
-            const modeMap = { d: "direct", s: "s5", p: "parallel" };
-            const mode = modeMap[getParamValue(["t", "m", "type", "mode"])] || "parallel";
-            const s5Param = getParamValue(["s", "socks", "proxy"]);
-            const proxyParam = getParamValue(["p", "ip", "proxyip"]);
-            const proxyConfig = s5Param ? parseProxyAddress(s5Param) : null;
-            const PROXY_IP = proxyParam ? String(proxyParam) : null;
-            const getOrder = () => {
-                if (mode === "s5") return ["s5"];
-                const order = [];
-                for (const pair of url.search.slice(1).split("&")) {
-                    const key = pair.split("=")[0];
-                    if (["d", "dir", "direct"].includes(key)) order.push("direct");
-                    if (["s", "socks", "proxy"].includes(key)) order.push("s5");
-                    if (["p", "ip", "proxyip"].includes(key)) order.push("proxy");
-                }
-                if (order.length === 0 && PROXY_IP) return ["proxy", "direct"];
-                return order.length ? order : ["direct"];
-            };
-            return await handleXhttp(req, userConfig, { proxyConfig, PROXY_IP, getOrder });
+            return await handleXhttp(req, await getUserConfig(env), resolveRoute(url));
         }
 
         if (url.pathname === "/api/fetch-best-ip") {
@@ -3044,9 +2997,12 @@ export default {
             const protocols = Array.isArray(userConfig.protocols) && userConfig.protocols.length > 0
                 ? userConfig.protocols
                 : ["vless", "trojan"];
-            // sing-box 没有 xhttp 传输，转换时会把这类节点整条丢掉，所以对 singbox 目标退回 ws
+            // "surge&ver=4" 这类带参数的 target 先按 & 截断再取端点
+            const 端点名 = String(订阅类型).split("&")[0].trim().toLowerCase();
+            const target = SUBCONVERTER_TARGETS[端点名];
+            // sing-box / surge / loon / quanx 没有 xhttp，转换后节点会被丢掉，这几类退回 ws
             const nodeTransport = userConfig.transport === "xhttp" &&
-                String(订阅类型).split("&")[0].trim().toLowerCase() !== "singbox" ? "xhttp" : "ws";
+                !["singbox", "surge", "loon", "quanx"].includes(端点名) ? "xhttp" : "ws";
             const echParam = buildEchParam(userConfig);
             // 收集所有节点使用的域名（排除纯 IP），用于 ECH nameserver-policy 走 DoH 解析
             const echHosts = [...new Set(
@@ -3083,9 +3039,6 @@ export default {
                 status: 200,
                 headers: responseHeaders,
             });
-            // "surge&ver=4" 这类带参数的 target 先按 & 截断再取端点
-            const 端点名 = String(订阅类型).split("&")[0].trim().toLowerCase();
-            const target = SUBCONVERTER_TARGETS[端点名];
             // mixed，以及没有对应输出格式的（quanx / loon 等）：直接返回通用 base64 节点列表
             if (!target) return 原始节点列表();
             // 转换统一交给 subconverter 协议的服务（ZQ-SubApi 就是这层）：节点名单由本面板生成，
