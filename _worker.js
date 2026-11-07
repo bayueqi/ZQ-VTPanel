@@ -153,8 +153,8 @@ function normalizeServiceBase(v) {
 }
 // 订阅转换配置文件：subconverter 的 config= 参数，仅对 clash 生效
 const SUB_CONFIG_BASE = "https://raw.githubusercontent.com/bayueqi/ZQ-JKPanel/main/";
-// 面板静态页地址：docs/ 目录发布到 Pages 后的根地址，可用环境变量 PANEL_URL 覆盖
-const DEFAULT_PANEL_URL = "https://bayueqi.github.io/ZQ-JKPanel";
+// 面板地址：docs/ 静态页的根地址，或 jkpanel.js 部署后的域名，可用环境变量 PANEL_URL 覆盖
+const DEFAULT_PANEL_URL = "https://jkpanel.vpnjk.cc.cd";
 const SUB_CONFIG_PRESETS = [
     ["", "不使用"],
     ["ZQ-AllInOne.ini", "全能版"],
