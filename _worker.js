@@ -90,8 +90,8 @@ const getParam=(key)=>paramsMap[key][Math.floor(Math.random()*paramsMap[key].len
 // ----------- 共享常量和工具 -----------
 const DEFAULT_UUID = "ef9d104e-ca0e-4202-ba4b-a0afb969c747";
 const TRANSPORTS = ["ws", "xhttp", "grpc"];
-// 节点名后缀用，多选传输时同名节点会冲突
-const TRANSPORT_LABEL = { ws: "WS", xhttp: "XHTTP", grpc: "gRPC" };
+// 节点名里的传输标记：W = WebSocket，X = XHTTP，G = gRPC
+const TRANSPORT_BADGE = { ws: "W", xhttp: "X", grpc: "G" };
 // 客户端各端点支持的传输层：sing-box 没有 xhttp，surge / loon / quanx 只认 ws
 const TRANSPORT_UNSUPPORTED = {
     singbox: ["xhttp"],
@@ -2648,15 +2648,15 @@ export default {
             return nodes;
         };
 
-        // 每个基础节点 × 每个传输层各出一个；多选时节点名加传输后缀，避免同名冲突
+        // 每个基础节点 × 每个传输层各出一个。传输标记统一写进节点名，
+        // 多选时同一备注会出多条，靠名字里的 W/X/G 区分
         const expandNodes = (nodes, transports) => {
             const list = transports.length ? transports : ["ws"];
-            const multi = list.length > 1;
             const out = [];
             for (const n of nodes) {
                 for (const t of list) {
                     out.push({
-                        label: multi ? `${n.label} · ${TRANSPORT_LABEL[t]}` : n.label,
+                        label: n.label,
                         transport: t,
                         raw: buildPathFor(t, ...n.params),
                         addr: n.addr,
@@ -2666,6 +2666,10 @@ export default {
             }
             return out;
         };
+
+        // 节点名：协议-传输-备注，如 V-W-香港 / T-G-日本
+        const nodeName = (proto, transport, label) =>
+            `${proto}-${TRANSPORT_BADGE[transport] || "W"}-${label}`;
 
         if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
             const u = normalizeQueryPath(new URL(req.url));
@@ -3204,12 +3208,12 @@ export default {
             const transportPaths = new Map();
             for (const n of nodes) {
                 if (protocols.includes("vless")) {
-                    const name = "V " + n.label;
+                    const name = nodeName("V", n.transport, n.label);
                     transportPaths.set(name, { transport: n.transport, path: n.raw });
                     out.push(buildVlessUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 }
                 if (protocols.includes("trojan")) {
-                    const name = "T " + n.label;
+                    const name = nodeName("T", n.transport, n.label);
                     transportPaths.set(name, { transport: n.transport, path: n.raw });
                     out.push(buildTrojanUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 }
@@ -3465,9 +3469,9 @@ export default {
             const echParam = buildEchParam(userConfig);
             for (const n of nodes) {
                 if (protocols.includes("vless"))
-                    allNodeUris.push(buildVlessUri(n.raw, userUUID, "V " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
+                    allNodeUris.push(buildVlessUri(n.raw, userUUID, nodeName("V", n.transport, n.label), lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 if (protocols.includes("trojan"))
-                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, "T " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
+                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, nodeName("T", n.transport, n.label), lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
             }
             const allNodesJson = JSON.stringify(allNodeUris);
             const html = `
