@@ -3382,14 +3382,20 @@ export default {
 		    box-shadow: var(--shadow-lg);
 		}
 		.error {
-		    margin-top: 16px;
-		    color: #dc2626;
-		    text-align: center;
+		    position: fixed;
+		    top: 20px;
+		    right: 20px;
+		    max-width: min(340px, calc(100vw - 40px));
+		    padding: 11px 15px 11px 13px;
+		    border-radius: 10px;
+		    background: #fff;
+		    border: 1px solid rgba(15,23,42,.08);
+		    border-left: 3px solid #ef4444;
+		    box-shadow: 0 8px 24px rgba(15,23,42,.12);
+		    color: #1f2937;
 		    font-size: 14px;
-		    padding: 12px;
-		    border-radius: 8px;
-		    background: rgba(220,38,38,0.1);
-		    border: 1px solid rgba(220,38,38,0.2);
+		    line-height: 1.55;
+		    text-align: left;
 		}
 	</style>
 </head>
@@ -3537,11 +3543,11 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 #qrCanvas{display:flex;justify-content:center;margin:20px 0;padding:20px;background:#fff;border-radius:16px;border:1px solid var(--border)}
 .qr-close{background:linear-gradient(135deg,var(--primary),var(--primary-light));color:#fff;border:none;padding:12px 32px;border-radius:12px;font-weight:600;cursor:pointer;transition:.25s}
 .qr-close:hover{transform:translateY(-2px)}
-.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(100px);background:rgba(30,58,95,.85);color:#fff;padding:12px 24px;border-radius:12px;font-size:14px;opacity:0;transition:.35s;z-index:2000;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
-.toast.show{transform:translateX(-50%) translateY(0);opacity:1}
-.message{margin-top:12px;padding:12px 16px;border-radius:12px;text-align:center;font-size:14px;font-weight:500}
-.message.success{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.35);color:#065f46}
-.message.error{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);color:#991b1b}
+.toast-box{position:fixed;top:20px;right:20px;display:flex;flex-direction:column;align-items:flex-end;gap:10px;z-index:2000;pointer-events:none}
+.toast{max-width:min(340px,calc(100vw - 40px));padding:11px 15px 11px 13px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--primary);border-radius:10px;box-shadow:0 8px 24px rgba(15,23,42,.12);color:var(--text);font-size:14px;line-height:1.55;opacity:0;transform:translateX(24px);transition:opacity .25s ease,transform .25s ease}
+.toast.show{opacity:1;transform:translateX(0)}
+.toast.success{border-left-color:#10b981}
+.toast.error{border-left-color:#ef4444}
 @media(max-width:640px){
 	body::before{width:280px;height:280px;top:-90px;left:-90px}
 	body::after{width:300px;height:300px;bottom:-100px;right:-90px}
@@ -3759,7 +3765,6 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 				<button type="submit" class="btn btn-primary">保存配置</button>
 				<button type="button" class="btn btn-secondary" id="reloadBtn">重新加载</button>
 			</div>
-			<div id="message" class="message" style="display:none"></div>
 			</form>
 		</div>
 		<div class="qr-modal" id="qrModal">
@@ -3787,16 +3792,27 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 				<button class="qr-close" id="closeTransportBtn">我知道了</button>
 			</div>
 		</div>
-		<div class="toast" id="toast"></div>
+		<div class="toast-box" id="toastBox"></div>
 		<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 		<script>
 			(function () {
 				if (location.search) history.replaceState(null, '', location.pathname);
 
-				var toastEl = document.getElementById('toast');
-				var msgEl = document.getElementById('message');
-				function showToast(m) { toastEl.textContent = m; toastEl.classList.add('show'); setTimeout(function () { toastEl.classList.remove('show'); }, 2000); }
-				function showMessage(t, type) { msgEl.textContent = t; msgEl.className = 'message ' + type; msgEl.style.display = 'block'; setTimeout(function () { msgEl.style.display = 'none'; }, 3000); }
+				var toastBox = document.getElementById('toastBox');
+				// 所有提示统一走右上角，可叠加；type 为空时只用主色边
+				function showToast(t, type, ms) {
+					while (toastBox.children.length >= 4) toastBox.firstElementChild.remove();
+					var el = document.createElement('div');
+					el.className = 'toast' + (type ? ' ' + type : '');
+					el.textContent = t;
+					toastBox.appendChild(el);
+					requestAnimationFrame(function () { el.classList.add('show'); });
+					setTimeout(function () {
+						el.classList.remove('show');
+						setTimeout(function () { el.remove(); }, 260);
+					}, ms || (type ? 3000 : 2000));
+				}
+				function showMessage(t, type) { showToast(t, type); }
 				function fallbackCopy(text) {
 					var ta = document.createElement('textarea');
 					ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'absolute'; ta.style.left = '-9999px';
@@ -3809,7 +3825,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					var ok = false;
 					if (navigator.clipboard && navigator.clipboard.writeText) { try { await navigator.clipboard.writeText(t); ok = true; } catch (e) {} }
 					if (!ok) ok = fallbackCopy(t);
-					showToast(ok ? '已复制到剪贴板' : '复制失败');
+					showToast(ok ? '已复制到剪贴板' : '复制失败', ok ? 'success' : 'error');
 				}
 				document.querySelectorAll('button.copy').forEach(function (b) { b.addEventListener('click', function (e) { doCopy(e.currentTarget); }); });
 
@@ -3819,7 +3835,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					var ok = false;
 					if (navigator.clipboard && navigator.clipboard.writeText) { try { await navigator.clipboard.writeText(b64); ok = true; } catch (e) {} }
 					if (!ok) ok = fallbackCopy(b64);
-					showToast(ok ? '已导出到剪贴板' : '导出失败');
+					showToast(ok ? '已导出到剪贴板' : '导出失败', ok ? 'success' : 'error');
 				});
 
 				var qrCode = null;
