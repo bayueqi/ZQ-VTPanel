@@ -3533,7 +3533,6 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .help-list li::marker{color:var(--primary);font-weight:700}
 .help-tip{display:flex;align-items:center;gap:8px;margin-top:14px;padding:11px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;color:#b91c1c;font-size:13px;font-weight:600}
 .help-tip svg{flex:none}
-.help-foot{margin:14px 0 0;font-size:12.5px;color:var(--muted);line-height:1.7}
 .help-link{color:var(--primary);font-weight:600;text-decoration:none;border-bottom:1px solid rgba(37,99,235,.35)}
 .help-link:hover{color:var(--primary-dark);border-bottom-color:var(--primary-dark)}
 .qr-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(30,58,95,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:1000;align-items:center;justify-content:center;padding:20px}
@@ -3776,7 +3775,6 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						<span>网络（Network） &gt; gRPC &gt; 开启</span>
 						<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#16a34a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13l5 5L20 6"/></svg>
 					</div>
-					<p class="help-foot">WebSocket 无需额外设置；XHTTP 需 mihomo 1.19.22 起或 Xray 新版；gRPC 需 mihomo、Xray、v2rayN。</p>
 				</div>
 				<button class="qr-close" id="closeTransportBtn">我知道了</button>
 			</div>
