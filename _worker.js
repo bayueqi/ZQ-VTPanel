@@ -3527,13 +3527,14 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .help-dot:hover{border-color:var(--primary);color:var(--primary)}
 .help-body{text-align:left;font-size:14px;color:var(--text);line-height:1.8}
 .help-body p{margin:0 0 10px}
-.help-key{font-weight:700;margin-right:4px}
-.help-key::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:2px;background:currentColor}
-.k-ws{color:#0891b2}
-.k-xhttp{color:#c2410c}
-.k-grpc{color:#7c3aed}
-.help-sub{color:var(--muted);font-size:13px;padding-left:16px;margin-bottom:6px !important}
-.help-link{display:inline-block;margin-top:2px;color:var(--primary);font-weight:600;text-decoration:none;border-bottom:1px solid rgba(37,99,235,.35);line-height:1.4}
+.help-lead{font-weight:600;margin-bottom:12px !important}
+.help-list{margin:0;padding-left:20px}
+.help-list li{margin-bottom:10px}
+.help-list li::marker{color:var(--primary);font-weight:700}
+.help-tip{display:flex;align-items:center;gap:8px;margin-top:14px;padding:11px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;color:#b91c1c;font-size:13px;font-weight:600}
+.help-tip svg{flex:none}
+.help-foot{margin:14px 0 0;font-size:12.5px;color:var(--muted);line-height:1.7}
+.help-link{color:var(--primary);font-weight:600;text-decoration:none;border-bottom:1px solid rgba(37,99,235,.35)}
 .help-link:hover{color:var(--primary-dark);border-bottom-color:var(--primary-dark)}
 .qr-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(30,58,95,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:1000;align-items:center;justify-content:center;padding:20px}
 .qr-modal.active{display:flex}
@@ -3765,11 +3766,17 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 			<div class="qr-content">
 				<div class="qr-title">传输类型说明</div>
 				<div class="help-body">
-					<p><span class="help-key k-ws">WebSocket</span>无需额外设置，所有客户端都支持。</p>
-					<p><span class="help-key k-xhttp">XHTTP</span>需客户端支持，mihomo 1.19.22 起、Xray 系新版可用。</p>
-					<p><span class="help-key k-grpc">gRPC</span>需客户端支持，mihomo、Xray、v2rayN 均可，另需满足两点：</p>
-					<p class="help-sub">1. 部署在 Workers，不是 Pages。</p>
-					<p class="help-sub">2. 在 Cloudflare 面板为当前域名开启 gRPC，<a class="help-link" href="https://dash.cloudflare.com/?to=/:account/:zone/network" target="_blank" rel="noopener">前往网络设置</a>。</p>
+					<p class="help-lead">选择 XHTTP 或 gRPC 时，使用前请确认以下两点：</p>
+					<ol class="help-list">
+						<li>项目必须部署在 <b>Workers</b>，不是 Pages。</li>
+						<li>请前往 <a class="help-link" href="https://dash.cloudflare.com/?to=/:account/:zone/network" target="_blank" rel="noopener">Cloudflare 面板</a>为当前域名开启 <b>gRPC</b>，否则节点可能无法连接。</li>
+					</ol>
+					<div class="help-tip">
+						<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-6.1 7-11a7 7 0 1 0-14 0c0 4.9 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>
+						<span>网络（Network） &gt; gRPC &gt; 开启</span>
+						<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#16a34a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13l5 5L20 6"/></svg>
+					</div>
+					<p class="help-foot">WebSocket 无需额外设置；XHTTP 需 mihomo 1.19.22 起或 Xray 新版；gRPC 需 mihomo、Xray、v2rayN。</p>
 				</div>
 				<button class="qr-close" id="closeTransportBtn">我知道了</button>
 			</div>
