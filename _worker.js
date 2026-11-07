@@ -3285,7 +3285,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 								</div>
 								<div id="domains" class="list"></div>
 								<div class="input-group">
-									<input type="text" id="domainNew" placeholder="输入IP或域名">
+									<input type="text" id="domainNew" placeholder="格式 host[:端口]，IP 或域名">
 									<input type="text" id="domainRemarkNew" placeholder="输入备注">
 									<button type="button" id="addDomain" class="btn btn-secondary chip">添加</button>
 								</div>
@@ -3297,7 +3297,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 								</div>
 								<div id="proxyIps" class="list"></div>
 								<div class="input-group">
-									<input type="text" id="proxyIpNew" placeholder="格式 host:port 或 host">
+									<input type="text" id="proxyIpNew" placeholder="格式 host[:端口]，IP 或域名">
 									<button type="button" id="addProxyIp" class="btn btn-secondary chip">添加</button>
 								</div>
 							</div>
@@ -3310,7 +3310,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 								<label>入口地址</label>
 								<div id="entries" class="list"></div>
 								<div class="input-group">
-									<input type="text" id="entryNew" placeholder="输入IP或域名">
+									<input type="text" id="entryNew" placeholder="格式 host[:端口]，IP 或域名">
 									<button type="button" id="addEntry" class="btn btn-secondary chip">添加</button>
 								</div>
 							</div>
@@ -3548,8 +3548,8 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						state.proxies = (cfg.proxies || []).map(function (x) { return { first: (x.proxy || ''), second: (x.remark || '') }; });
 
 						renderPairList(document.getElementById('domains'), state.domains, '格式 host[:端口]，IP 或域名', '输入备注');
-						renderStrList(document.getElementById('proxyIps'), state.proxyIps, 'host:port 或 host');
-						renderStrList(document.getElementById('entries'), state.entries, 'IP或域名');
+						renderStrList(document.getElementById('proxyIps'), state.proxyIps, '格式 host[:端口]，IP 或域名');
+						renderStrList(document.getElementById('entries'), state.entries, '格式 host[:端口]，IP 或域名');
 						renderPairList(document.getElementById('proxies'), state.proxies, '格式 [协议://]user:pass@host:port', '输入备注');
 						// 列表填充后内容变高，重新同步已展开块的高度
 						setTimeout(syncHeights, 0);
@@ -3637,11 +3637,11 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						} else if (kind === 'proxyIp') {
 							if (!v) return;
 							state.proxyIps.push(v);
-							renderStrList(document.getElementById('proxyIps'), state.proxyIps, 'host:port 或 host');
+							renderStrList(document.getElementById('proxyIps'), state.proxyIps, '格式 host[:端口]，IP 或域名');
 						} else if (kind === 'entry') {
 							if (!v) return;
 							state.entries.push(v);
-							renderStrList(document.getElementById('entries'), state.entries, 'IP或域名');
+							renderStrList(document.getElementById('entries'), state.entries, '格式 host[:端口]，IP 或域名');
 						}
 						document.getElementById(inputId).value = '';
 						document.getElementById(remarkId).value = '';
