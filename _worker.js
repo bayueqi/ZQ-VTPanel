@@ -510,8 +510,9 @@ function clashTransportHotPatch(clashYaml, { host, byLabel, grpcUA }) {
             return line.replace(/\}$/, `, grpc-opts: {grpc-user-agent: ${JSON.stringify(ua)}}}`);
         }
         if (new RegExp(`network:\\s*${transport}\\b`).test(line)) return line;
-        // mihomo 的 path 按字面值用，query 只会被当成路径的一部分，这里直接去掉
-        const clashPath = transport === "xhttp" ? path.split("?")[0] : path;
+        // mihomo 的 path 按字面值用，query 只会被当成路径的一部分，这里直接去掉；
+        // gRPC 服务名同理去掉前导斜杠，否则拼出 //xxx/Tun
+        const clashPath = transport === "xhttp" ? path.split("?")[0] : path.replace(/^\/+/, "");
         const optsOf = transport === "grpc"
             ? `grpc-opts: {grpc-service-name: ${JSON.stringify(clashPath)}${ua ? `, grpc-user-agent: ${JSON.stringify(ua)}` : ""}}`
             : `xhttp-opts: {path: ${JSON.stringify(clashPath)}, host: ${JSON.stringify(host)}, mode: stream-one}`;
