@@ -3547,7 +3547,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						state.entries = (cfg.entries || []).map(function (x) { return String(x || ''); });
 						state.proxies = (cfg.proxies || []).map(function (x) { return { first: (x.proxy || ''), second: (x.remark || '') }; });
 
-						renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
+						renderPairList(document.getElementById('domains'), state.domains, '格式 host[:端口]，IP 或域名', '输入备注');
 						renderStrList(document.getElementById('proxyIps'), state.proxyIps, 'host:port 或 host');
 						renderStrList(document.getElementById('entries'), state.entries, 'IP或域名');
 						renderPairList(document.getElementById('proxies'), state.proxies, '格式 [协议://]user:pass@host:port', '输入备注');
@@ -3628,7 +3628,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							var r = document.getElementById(remarkId).value.trim();
 							if (!v) return;
 							state.domains.push({ first: v, second: r });
-							renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
+							renderPairList(document.getElementById('domains'), state.domains, '格式 host[:端口]，IP 或域名', '输入备注');
 						} else if (kind === 'proxy') {
 							var r2 = document.getElementById(remarkId).value.trim();
 							if (!v) return;
@@ -3696,7 +3696,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							var result = await res.json();
 							if (result.success && result.domains) {
 								state.domains = result.domains.map(function (d) { return { first: d.ip || '', second: d.remark || '' }; });
-								renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
+								renderPairList(document.getElementById('domains'), state.domains, '格式 host[:端口]，IP 或域名', '输入备注');
 								showMessage('成功更新 ' + result.added + ' 个优选IP/域名', 'success');
 							} else { showMessage(result.error || '未获取到优选IP/域名', 'error'); }
 						} catch (e) { showMessage('获取优选IP/域名失败: ' + e.message, 'error'); }
@@ -3759,10 +3759,9 @@ async function fetchTextWithTimeout(url, accept, ms) {
 
 // 备注以「优选」开头的是上一次拉取的批次，本次整批替换；不带该字样的视为手动填写，保留
 const isPreferredItem = (item) => (item.remark || "").startsWith("优选");
-const BEST_IP_LIMIT = 100;
 
-// 手动条目原样保留，自动拉取的整批替换；超过上限只截自动部分，不动手动条目
-function mergePreferred(current, fresh, keyOf, makeItem, limit) {
+// 手动条目原样保留，自动拉取的整批替换
+function mergePreferred(current, fresh, keyOf, makeItem) {
     const manual = current.filter((it) => !isPreferredItem(it));
     const existing = new Set(manual.map(keyOf));
     const auto = [];
@@ -3772,15 +3771,14 @@ function mergePreferred(current, fresh, keyOf, makeItem, limit) {
         existing.add(key);
         auto.push(makeItem(it));
     }
-    if (limit && manual.length + auto.length > limit) return [...manual, ...auto.slice(0, Math.max(0, limit - manual.length))];
     return [...manual, ...auto];
 }
 
 const mergeBestIps = (domains, ips) =>
-    mergePreferred(normalizeDomains(domains), ips, (d) => d.ip, (i) => ({ ip: i.ip, remark: isIpHost(i.ip) ? "优选IP" : "优选域名" }), BEST_IP_LIMIT);
+    mergePreferred(normalizeDomains(domains), ips, (d) => d.ip, (i) => ({ ip: i.ip, remark: isIpHost(i.ip) ? "优选IP" : "优选域名" }));
 
 const mergeProxies = (proxies, fresh) =>
-    mergePreferred(proxies || [], fresh, (p) => p.proxy, (p) => ({ proxy: p.proxy, remark: "优选" + p.remark }), 0);
+    mergePreferred(proxies || [], fresh, (p) => p.proxy, (p) => ({ proxy: p.proxy, remark: "优选" + p.remark }));
 
 // 未勾选或没填地址时返回 null，不发请求；拉取失败返回空数组，不拖累另一个源
 const pullList = (enabled, url, accept, parse) =>
