@@ -2,9 +2,7 @@
 
 ![界面](src/界面.png)
 
-一个跑在 Cloudflare Workers 上的 VLESS / Trojan 节点面板。`_worker.js` 是核心（隧道、订阅分发、接口），`docs/` 是管理界面（静态页，由核心反代），两部分独立部署、互不影响。
-
-仓库另附 `jkpanel.js`，整份代码单独部署成一个 Worker 即可运行，不依赖上面两个文件。
+一个跑在 Cloudflare Workers 上的 VLESS / Trojan 节点面板，一份 `_worker.js` 同时是节点隧道、订阅分发器和 Web 管理后台。
 
 ## 功能
 
@@ -18,18 +16,6 @@
 - 密码登录鉴权，路径与参数伪装混淆
 
 ## 部署步骤
-
-### 1. 发布面板页面（可选）
-
-面板是 `docs/` 下的两个静态文件（`index.html`、`login.html`），任意静态托管均可，以下用 GitHub Pages：
-
-1. 仓库 **Settings** → **Pages**
-2. **Source** 选择 **Deploy from a branch**，分支 `main`，目录 `/docs`，保存
-3. 等待发布完成，得到访问地址
-
-`_worker.js` 的默认面板地址是 `https://jkpanel.vpnjk.cc.cd`。面板地址与此不同时，部署核心 Worker 时用环境变量 `PANEL_URL` 指定。
-
-### 2. 部署核心 Worker
 
 1. 登录 Cloudflare 控制台
 2. 左侧进入 **Workers 和 Pages**
@@ -48,12 +34,8 @@
    - 变量名称：`JKPanel`
    - 选择刚创建的 KV 命名空间
    - 点击 **保存**
-9. 面板地址（可选，非默认地址时必填）：
-   - 同一个页面 → **变量和机密** → **添加** → 类型选 **文本**
-   - 变量名称：`PANEL_URL`，值为第 1 步得到的面板地址
-10. 绑定自定义域名（注意：不能使用 workers 默认域名）
-
-面板只能通过 Worker 域名访问。页面里的接口请求走同域相对路径，直接打开 Pages 地址取不到数据。
+9. 绑定自定义域名（注意：不能使用 workers 默认域名）
+10. 访问该域名，面板与节点由同一个 Worker 提供
 
 ## 使用
 
@@ -70,7 +52,7 @@
 | 密码 | 面板登录凭据，默认 `admin`，登录后修改 |
 | UUID | 节点凭据，也是订阅链接凭据 |
 | 协议类型 | VLESS / Trojan，至少选一个 |
-| 传输类型 | WebSocket / XHTTP / gRPC，至少选一个，可多选。节点名格式为 `协议-传输 备注`，协议 `V`（VLESS）/ `T`（Trojan），传输 `W` / `X` / `G`，如 `V-G 香港`。XHTTP 需客户端支持（mihomo 1.19.22 起、Xray 系新版）；gRPC 需部署在 Workers（Pages 不支持），并在 Cloudflare 面板开启 gRPC（网络 > gRPC）。Sing-Box 的订阅不出 XHTTP，Surge / Loon / Quantumult X 的订阅只出 WebSocket |
+| 传输类型 | WebSocket / XHTTP / gRPC，至少选一个，可多选。节点名格式为 `协议-传输 备注`，协议 `V`（VLESS）/ `T`（Trojan），传输 `W` / `X` / `G`，如 `V-G 香港`。XHTTP 需客户端支持（mihomo 1.19.22 起、Xray 系新版）；gRPC 需部署在 Workers，并在 Cloudflare 面板开启 gRPC（网络 > gRPC）。Sing-Box 的订阅不出 XHTTP，Surge / Loon / Quantumult X 的订阅只出 WebSocket |
 | gRPC 模式 | `gun` 单流（默认）或 `multi` 多连接复用一条 HTTP/2。`mode` 参数仅 Xray 系客户端读取，mihomo 侧固定单流 |
 | gRPC UA | 覆盖 gRPC 客户端的 User-Agent，可点「获取当前 UA」填入浏览器 UA；留空用客户端自带。Clash 订阅写入 `grpc-opts.grpc-user-agent`，其余格式不含此项 |
 | 订阅转换服务 | subconverter 服务根地址（ZQ-SubApi 即这一层），留空用内置默认；可用环境变量 `SUBCONVERTER_BASE` 指定 |
