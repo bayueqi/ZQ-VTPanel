@@ -2622,28 +2622,24 @@ export default {
         if (url.pathname === "/api/fetch-best-ip") {
             const userConfig = await getUserConfig(env);
             let apiUrl = userConfig.bestIpApi || DEFAULT_BEST_IP_API;
-            let bodyUUID = null;
+            // 面板上未保存的列表优先，避免合并基准与页面不一致
+            let currentDomains = userConfig.domains;
             try {
                 const body = await req.json();
                 if (body.apiUrl) apiUrl = body.apiUrl;
-                bodyUUID = body.uuid || null;
+                if (Array.isArray(body.domains)) currentDomains = body.domains;
             } catch {}
             // 面板身份校验用 panel_auth（或旧 session=uuid 兼容）
             if (!(await isPanelAuthed(req, url, userConfig, env))) return json({ error: "请先登录" }, 401);
             
             try {
-                const response = await fetch(apiUrl, {
-                    headers: {
-                        "Accept": "text/html,application/xhtml+xml,application/xml;",
-                        "User-Agent": "cmliu/CF-Workers-DD2D",
-                    },
-                });
-                if (!response.ok) {
-                    throw new Error(`API请求失败: ${response.status}`);
-                }
-                const text = await response.text();
-                const ips = parseBestIpList(text).map((item) => ({ ip: item.ip, remark: "优选" + item.remark }));
-                return json({ success: true, ips: ips });
+                const text = await fetchTextWithTimeout(apiUrl, "text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS);
+                const ips = parseBestIpList(text);
+                if (!ips.length) return json({ success: false, error: "未获取到优选IP" });
+                // 与订阅自动拉取同一套合并逻辑：整批替换「优选」条目，保留手动填写的条目
+                const domains = mergeBestIps(currentDomains, ips);
+                const added = domains.filter((d) => (d.remark || "").startsWith("优选")).length;
+                return json({ success: true, added, domains });
             } catch (error) {
                 return json({ success: false, error: error.message }, 500);
             }
@@ -2653,28 +2649,23 @@ export default {
             const userConfig = await getUserConfig(env);
             let apiUrl = userConfig.proxyApi || "";
             let protocols = userConfig.proxyProtocols || SUPPORTED_PROXY_PROTOCOLS;
-            let bodyUUID = null;
+            let currentProxies = userConfig.proxies || [];
             try {
                 const body = await req.json();
                 if (body.apiUrl) apiUrl = body.apiUrl;
                 if (Array.isArray(body.protocols) && body.protocols.length) protocols = body.protocols;
-                bodyUUID = body.uuid || null;
+                if (Array.isArray(body.proxies)) currentProxies = body.proxies;
             } catch {}
-            if (!apiUrl) return json({ error: "未配置其它代理 API 地址" }, 400);
             if (!(await isPanelAuthed(req, url, userConfig, env))) return json({ error: "请先登录" }, 401);
+            if (!apiUrl) return json({ error: "未配置其它代理 API 地址" }, 400);
             try {
-                const response = await fetch(apiUrl, {
-                    headers: {
-                        "Accept": "text/plain,text/html,application/xhtml+xml,application/xml;",
-                        "User-Agent": "cmliu/CF-Workers-DD2D",
-                    },
-                });
-                if (!response.ok) {
-                    throw new Error(`API请求失败: ${response.status}`);
-                }
-                const text = await response.text();
-                const proxies = parseProxyApiList(text, protocols).map((p) => ({ proxy: p.proxy, remark: "优选" + p.remark }));
-                return json({ success: true, proxies });
+                const text = await fetchTextWithTimeout(apiUrl, "text/plain,text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS);
+                const fresh = parseProxyApiList(text, protocols);
+                if (!fresh.length) return json({ success: false, error: "未获取到其它代理" });
+                // 与订阅自动拉取同一套合并逻辑
+                const proxies = mergeProxies(currentProxies, fresh);
+                const added = proxies.filter((p) => (p.remark || "").startsWith("优选")).length;
+                return json({ success: true, added, proxies });
             } catch (error) {
                 return json({ success: false, error: error.message }, 500);
             }
@@ -2738,8 +2729,10 @@ export default {
         if (url.pathname === "/sub") {
             const inputUUID = getSessionUUID(req, url);
             if (!inputUUID) return new Response("missing uuid", { status: 400 });
-            const userConfig = await getUserConfig(env);
+            let userConfig = await getUserConfig(env);
             if (inputUUID !== userConfig.uuid) return new Response("Not Found", { status: 404 });
+            // 拉取失败或超时返回 null，沿用手上的配置继续响应
+            userConfig = (await maybeAutoUpdate(env, userConfig)) || userConfig;
             const lists = getDomains(req, userConfig);
             const nodes = buildNodes(userConfig, lists);
             const ua = (req.headers.get("User-Agent") || "").toLowerCase();
@@ -3668,16 +3661,14 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						try {
 							var res = await fetch('/api/fetch-best-ip', {
 								method: 'POST', headers: { 'Content-Type': 'application/json' },
-								body: JSON.stringify({ uuid: document.getElementById('uuid').value.trim() || '${userUUID}', apiUrl: document.getElementById('bestIpApi').value.trim() })
+								body: JSON.stringify({ uuid: document.getElementById('uuid').value.trim() || '${userUUID}', apiUrl: document.getElementById('bestIpApi').value.trim(), domains: state.domains.filter(function (x) { return x.first; }).map(function (x) { return { ip: x.first, remark: x.second }; }) })
 							});
 							var result = await res.json();
-							if (result.success && result.ips && result.ips.length) {
-								var existing = {}; state.domains.forEach(function (d) { existing[d.first] = 1; });
-								var added = 0;
-								result.ips.forEach(function (item) { if (!existing[item.ip]) { state.domains.push({ first: item.ip, second: item.remark || '优选' }); existing[item.ip] = 1; added++; } });
+							if (result.success && result.domains) {
+								state.domains = result.domains.map(function (d) { return { first: d.ip || '', second: d.remark || '' }; });
 								renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
-								showMessage('成功添加 ' + added + ' 个优选IP', 'success');
-							} else { showMessage('未获取到优选IP', 'error'); }
+								showMessage('成功更新 ' + result.added + ' 个优选IP', 'success');
+							} else { showMessage(result.error || '未获取到优选IP', 'error'); }
 						} catch (e) { showMessage('获取优选IP失败: ' + e.message, 'error'); }
 						finally { btn.textContent = old; btn.disabled = false; }
 					});
@@ -3689,15 +3680,13 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						try {
 							var res = await fetch('/api/fetch-proxies', {
 								method: 'POST', headers: { 'Content-Type': 'application/json' },
-								body: JSON.stringify({ uuid: document.getElementById('uuid').value.trim() || '${userUUID}', apiUrl: document.getElementById('proxyApi').value.trim(), protocols: Array.from(document.querySelectorAll('.proxy-protocol:checked')).map(function (cb) { return cb.value; }) })
+								body: JSON.stringify({ uuid: document.getElementById('uuid').value.trim() || '${userUUID}', apiUrl: document.getElementById('proxyApi').value.trim(), protocols: Array.from(document.querySelectorAll('.proxy-protocol:checked')).map(function (cb) { return cb.value; }), proxies: state.proxies.filter(function (x) { return x.first; }).map(function (x) { return { proxy: x.first, remark: x.second }; }) })
 							});
 							var result = await res.json();
-							if (result.success && result.proxies && result.proxies.length) {
-								var existing = {}; state.proxies.forEach(function (p) { existing[p.first] = 1; });
-								var added = 0;
-								result.proxies.forEach(function (item) { if (!existing[item.proxy]) { state.proxies.push({ first: item.proxy, second: item.remark || '优选' }); existing[item.proxy] = 1; added++; } });
+							if (result.success && result.proxies) {
+								state.proxies = result.proxies.map(function (p) { return { first: p.proxy || '', second: p.remark || '' }; });
 								renderPairList(document.getElementById('proxies'), state.proxies, '格式 [协议://]user:pass@host:port', '输入备注');
-								showMessage('成功添加 ' + added + ' 个其它代理', 'success');
+								showMessage('成功更新 ' + result.added + ' 个其它代理', 'success');
 							} else { showMessage((result.error || '未获取到其它代理'), 'error'); }
 						} catch (e) { showMessage('获取其它代理失败: ' + e.message, 'error'); }
 						finally { btn.textContent = old; btn.disabled = false; }
@@ -3717,104 +3706,93 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
         }
         return new Response("Not Found", { status: 404 });
     },
-    async scheduled(event, env, ctx) {
-        const cfg = await getUserConfig(env);
-        let domains = null;
-        let proxies = null;
-
-        // 1) 自动获取优选IP（覆盖备注以「优选」开头的旧拉取结果，保留手动填写）
-        if (cfg.autoUpdateBestIp && cfg.bestIpApi) {
-            try {
-                console.log("Starting scheduled best IP update");
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 5000);
-                try {
-                    const response = await fetch(cfg.bestIpApi, {
-                        method: 'get',
-                        headers: {
-                            "Accept": "text/html,application/xhtml+xml,application/xml;",
-                            "User-Agent": "cmliu/CF-Workers-DD2D",
-                        },
-                        signal: controller.signal,
-                    });
-
-                    if (!response.ok) {
-                        throw new Error(`API request failed: ${response.status}`);
-                    }
-
-                    const text = await response.text();
-                    const ips = parseBestIpList(text);
-
-                    if (ips.length > 0) {
-                        const current = normalizeDomains(cfg.domains);
-                        const existingIps = new Set(current.map(d => d.ip));
-                        const manual = current.filter(d => !(d.remark || '').startsWith('优选'));
-                        const preferred = ips
-                            .filter(item => !existingIps.has(item.ip))
-                            .map(item => ({ ip: item.ip, remark: '优选' + item.remark }));
-                        domains = [...manual, ...preferred];
-                        if (domains.length > 20) domains = domains.slice(0, 20);
-                        console.log(`Successfully updated ${preferred.length} best IPs`);
-                    } else {
-                        console.log("No valid IPs received from API");
-                    }
-                } finally {
-                    clearTimeout(timeout);
-                }
-            } catch (error) {
-                console.error("Error in scheduled best IP update:", error);
-            }
-        }
-
-        // 2) 自动获取其它代理（只保留带协议的节点，覆盖备注以「优选」开头的旧拉取结果，保留手动填写）
-        if (cfg.autoUpdateProxies && cfg.proxyApi) {
-            try {
-                console.log("Starting scheduled proxy update");
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 5000);
-                try {
-                    const response = await fetch(cfg.proxyApi, {
-                        method: 'get',
-                        headers: {
-                            "Accept": "text/plain,text/html,application/xhtml+xml,application/xml;",
-                            "User-Agent": "cmliu/CF-Workers-DD2D",
-                        },
-                        signal: controller.signal,
-                    });
-
-                    if (!response.ok) {
-                        throw new Error(`API request failed: ${response.status}`);
-                    }
-
-                    const text = await response.text();
-                    const fresh = parseProxyApiList(text, cfg.proxyProtocols);
-                    if (fresh.length > 0) {
-                        const current = cfg.proxies || [];
-                        const existingKeys = new Set(current.map(p => p.proxy));
-                        const manual = current.filter(p => !(p.remark || '').startsWith('优选'));
-                        const auto = fresh
-                            .filter(p => !existingKeys.has(p.proxy))
-                            .map(p => ({ proxy: p.proxy, remark: '优选' + p.remark }));
-                        proxies = [...manual, ...auto];
-                        console.log(`Successfully updated ${auto.length} proxies`);
-                    } else {
-                        console.log("No valid proxies received from API");
-                    }
-                } finally {
-                    clearTimeout(timeout);
-                }
-            } catch (error) {
-                console.error("Error in scheduled proxy update:", error);
-            }
-        }
-
-        // 3) 有更新时整份回写（带全所有字段，避免抹掉其它配置）
-        if ((domains || proxies) && env.VTPanel) {
-            const normalized = configForStore(cfg, {
-                domains: domains || cfg.domains,
-                proxies: proxies || cfg.proxies,
-            });
-            await env.VTPanel.put("user_config", JSON.stringify(normalized));
-        }
-    },
 };
+
+const AUTO_MAX_WAIT_MS = 8000;
+const AUTO_FETCH_TIMEOUT_MS = 5000;
+
+async function fetchTextWithTimeout(url, accept, ms) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+        const res = await fetch(url, {
+            method: 'get',
+            headers: { "Accept": accept, "User-Agent": "cmliu/CF-Workers-DD2D" },
+            signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`API request failed: ${res.status}`);
+        return await res.text();
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// 备注以「优选」开头的是上一次拉取的批次，本次整批替换；不带该字样的视为手动填写，保留
+const isPreferredItem = (item) => (item.remark || "").startsWith("优选");
+
+function mergeBestIps(domains, ips) {
+    const manual = normalizeDomains(domains).filter((d) => !isPreferredItem(d));
+    const existing = new Set(manual.map((d) => d.ip));
+    const merged = [...manual, ...ips.filter((i) => !existing.has(i.ip)).map((i) => ({ ip: i.ip, remark: "优选IP" }))];
+    return merged.length > 20 ? merged.slice(0, 20) : merged;
+}
+
+function mergeProxies(proxies, fresh) {
+    const manual = (proxies || []).filter((p) => !isPreferredItem(p));
+    const existing = new Set(manual.map((p) => p.proxy));
+    return [...manual, ...fresh.filter((p) => !existing.has(p.proxy)).map((p) => ({ proxy: p.proxy, remark: "优选" + p.remark }))];
+}
+
+// 拉取优选IP与其它代理并回写配置，返回合并后的配置；没有新内容返回 null
+async function runAutoUpdate(env, cfg) {
+    // 两个源并发拉，串行会把 5+5 秒叠到总超时之外
+    const [ips, fresh] = await Promise.all([
+        cfg.autoUpdateBestIp && cfg.bestIpApi
+            ? fetchTextWithTimeout(cfg.bestIpApi, "text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS)
+                .then(parseBestIpList)
+                .catch((e) => { console.error("Error in best IP update:", e); return []; })
+            : null,
+        cfg.autoUpdateProxies && cfg.proxyApi
+            ? fetchTextWithTimeout(cfg.proxyApi, "text/plain,text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS)
+                .then((text) => parseProxyApiList(text, cfg.proxyProtocols))
+                .catch((e) => { console.error("Error in proxy update:", e); return []; })
+            : null,
+    ]);
+
+    const domains = ips && ips.length ? mergeBestIps(cfg.domains, ips) : null;
+    const proxies = fresh && fresh.length ? mergeProxies(cfg.proxies, fresh) : null;
+    if (!env || !env.VTPanel || (!domains && !proxies)) return null;
+
+    const merged = configForStore(cfg, {
+        domains: domains || cfg.domains,
+        proxies: proxies || cfg.proxies,
+    });
+    // 内容没有变化就不写 KV，省掉一次无谓的写
+    const changed =
+        JSON.stringify(merged.domains) !== JSON.stringify(cfg.domains) ||
+        JSON.stringify(merged.proxies) !== JSON.stringify(cfg.proxies);
+    if (changed) await env.VTPanel.put("user_config", JSON.stringify(merged));
+    return merged;
+}
+
+// 订阅请求触发。返回合并后的配置供本次响应用，未更新则返回 null
+async function maybeAutoUpdate(env, cfg) {
+    try {
+        if (!env || !env.VTPanel) return null;
+        cfg = cfg || (await getUserConfig(env));
+        if (!cfg.autoUpdateBestIp && !cfg.autoUpdateProxies) return null;
+        let timer;
+        const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), AUTO_MAX_WAIT_MS); });
+        try {
+            return await Promise.race([
+                runAutoUpdate(env, cfg).catch((e) => { console.error("Error in auto update:", e); return null; }),
+                timeout,
+            ]);
+        } finally {
+            clearTimeout(timer);
+        }
+    } catch (e) {
+        console.error("Error in auto update:", e);
+        return null;
+    }
+}
