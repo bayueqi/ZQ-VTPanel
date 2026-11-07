@@ -2737,9 +2737,9 @@ export default {
                 const host = nodeHost(a.host);
                 if (proxyIps.length) {
                     // 填了 ProxyIP：只出「优选IP × ProxyIP」节点，不再单独出优选IP直连节点
-                    // 全局 = 只走 ProxyIP；非全局 = 先直连，失败再回退 ProxyIP
+                    // ProxyIP 只做直连失败后的顶替，跟全局开关无关：永远是先直连，打不通才换它
                     for (const p of proxyIps)
-                        nodes.push({ label: d.remark || d.ip, params: [cfg.globalProxy ? "p" : "dp", cfg.globalProxy ? 0 : 1, null, p], addr: host, port: a.port });
+                        nodes.push({ label: d.remark || d.ip, params: ["dp", 1, null, p], addr: host, port: a.port });
                 } else {
                     nodes.push({ label: d.remark || d.ip, params: ["d", 1, null, null], addr: host, port: a.port });
                 }
