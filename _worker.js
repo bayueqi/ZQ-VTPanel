@@ -630,7 +630,15 @@ function getPanelBoot(env, cfg) {
     return getPanelPassword(env, cfg);
 }
 
+// 配置读缓存。隧道每条连接都要读一次配置，测速时几十条并发一起读，
+// 排队等 KV 的时间会算进客户端看到的握手时间里（表现就是延迟 -1 或数值偏大）。
+// 缓存 3 秒，面板保存时清掉，改动照旧即时生效
+let cfgCache = null;
+let cfgCacheAt = 0;
+const CFG_TTL_MS = 3000;
+
 async function getUserConfig(env) {
+    if (cfgCache && Date.now() - cfgCacheAt < CFG_TTL_MS) return cfgCache;
     const fallback = { ...DEFAULT_CONFIG };
     // SUBCONVERTER_BASE 环境变量作为「部署级默认值」：存储里没有 subConvertBase 时生效。
     // 面板上保存过一次之后以面板里的值为准。
@@ -676,7 +684,9 @@ async function getUserConfig(env) {
         // 旧 domain 单值并入 domains
         const d = (m.domain || "").trim();
         if (d && !m.domains.some((x) => x.ip === d)) m.domains.unshift({ ip: d, remark: "" });
-        return { ...fallback, ...m };
+        cfgCache = { ...fallback, ...m };
+        cfgCacheAt = Date.now();
+        return cfgCache;
     } catch {
         return fallback;
     }
@@ -2454,47 +2464,51 @@ function parseXhttpHead(raw, uuid) {
     return { state: "ok", isTrojan: true, hostname: r.addr, port, isUDP: cmd === 3, offset: r.pos + 4 };
 }
 
-// xhttp 与 gRPC 共用：按 t/d/s/p 决定的顺序连目标，首包一起带过去
-// 有备选时前一条路不能死等：直连被丢包会一直挂在 opened 上，
-// 客户端那边表现就是测速超时（延迟显示 -1），实际过几秒又能用。
-// 所以非最后一条尝试超过 1.5 秒就放手，让后面的接上；超时后才连上的连接要主动关掉
-const CONNECT_ATTEMPT_MS = 1500;
-function withConnectTimeout(promise, ms) {
-    if (!ms) return promise;
+// xhttp 与 gRPC 共用：按 t/d/s/p 决定的顺序连目标，首包一起带过去。
+// 建连靠并发：同一跳同时拨两路，谁先连上就用谁，其余立刻关掉。
+// 单路串行时，被丢包的那一路会一直挂在 opened 上，客户端等不到回包就是 -1；
+// 有备选时一次尝试只给 1 秒，超时就换下一跳（直连 / ProxyIP / 其它代理）
+const CONNECT_ATTEMPT_MS = 1000;
+const DIAL_PARALLEL = 2;
+
+function dialRace(make, parallel, ms) {
     return new Promise((resolve) => {
         let settled = false;
-        const timer = setTimeout(() => {
-            if (settled) return;
+        let pending = parallel;
+        const settle = (sock) => {
+            if (settled) { if (sock) { try { sock.close(); } catch {} } return; }
             settled = true;
-            resolve(null);
-        }, ms);
-        promise.then((sock) => {
             clearTimeout(timer);
-            if (settled) { try { sock && sock.close(); } catch {} return; }
-            settled = true;
-            resolve(sock);
-        }, () => {
-            clearTimeout(timer);
-            if (settled) return;
-            settled = true;
-            resolve(null);
-        });
+            resolve(sock || null);
+        };
+        const timer = setTimeout(() => settle(null), ms);
+        for (let i = 0; i < parallel; i++) {
+            make().then(
+                (sock) => settle(sock),
+                () => { if (!settled && --pending === 0) settle(null); },
+            );
+        }
     });
 }
+
+const dialerFor = (type, head, opts, payload) => {
+    if (type === "direct") return () => connectDirect(head.hostname, head.port, payload);
+    if (type === "s5" && opts.proxyConfig) return () => connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
+    if (type === "proxy" && opts.PROXY_IP) {
+        const p = splitProxyIp(opts.PROXY_IP);
+        return () => connectDirect(p.host, p.port, payload);
+    }
+    return null;
+};
 
 async function connectByOrder(head, opts, payload) {
     const order = opts.getOrder();
     for (let i = 0; i < order.length; i++) {
-        const type = order[i];
-        let attempt = null;
-        if (type === "direct") attempt = connectDirect(head.hostname, head.port, payload);
-        else if (type === "s5" && opts.proxyConfig) attempt = connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
-        else if (type === "proxy" && opts.PROXY_IP) {
-            const p = splitProxyIp(opts.PROXY_IP);
-            attempt = connectDirect(p.host, p.port, payload);
-        }
-        if (!attempt) continue;
-        const sock = await withConnectTimeout(attempt.catch(() => null), i === order.length - 1 ? 0 : CONNECT_ATTEMPT_MS);
+        const make = dialerFor(order[i], head, opts, payload);
+        if (!make) continue;
+        // 最后一跳没有备选，多给点时间；前面的跳只为抢时间，超时就往下走
+        const last = i === order.length - 1;
+        const sock = await dialRace(make, last ? 1 : DIAL_PARALLEL, last ? 8000 : CONNECT_ATTEMPT_MS);
         if (sock) return sock;
     }
     return null;
@@ -2569,6 +2583,11 @@ function grpcRoute(u) {
     return null;
 }
 
+// 下行直通用的管道：Workers 里 IdentityTransformStream 不做内部分块攒包，
+// 写进去就出流，首字节不会被拖；本地跑不到时退化成普通 TransformStream
+const makePipe = () =>
+    typeof IdentityTransformStream !== "undefined" ? new IdentityTransformStream() : new TransformStream();
+
 // 隧道请求的路由：路径段优先（xhttp 混淆、gRPC 都用这种），老订阅仍然读查询串
 const tunnelRoute=(u)=>grpcRoute(u)||resolveRoute(u);
 
@@ -2630,70 +2649,50 @@ async function handleTunnel(req, userConfig, opts, mode) {
     const sockPromise = connectByOrder(head, opts, headBuf.subarray(head.offset));
     sockPromise.then((s) => { if (cancelled && s) { try { s.close(); } catch {} } }).catch(() => {});
 
-    // 首包里没被头部吃掉的正文，后面直接跟着往上写
-    // 这段正文在 connectByOrder 建连时已经写进上游了，只有另外读到的那一包才算新数据
-    let leadBuf = headBuf.subarray(head.offset);
-    let leadFresh = false;
-    let leadP = null;
-    const probeWanted = !isGrpc && head.port === 80;
-    const getLead = () => {
-        if (!probeWanted || leadBuf.byteLength) return Promise.resolve(leadBuf);
-        if (!leadP) {
-            leadP = reader.read().then((s) => {
-                if (s.done || !s.value || !s.value.byteLength) return null;
-                leadBuf = new Uint8Array(s.value);
-                leadFresh = true;
-                return leadBuf;
-            }, () => null);
-        }
-        return leadP;
-    };
-    // 测速用的 204 探测本地回掉：走 ProxyIP 时这类明文探测本来也到不了目标，
-    // 一直连上游只会让客户端显示 -1。判断放在首包正文上，最多等 800ms
-    let probeHit = false;
-    const probeP = probeWanted
-        ? Promise.race([
-            getLead().then((b) => isProbe204(b)),
-            new Promise((r) => setTimeout(() => r(false), 800)),
-        ]).then((hit) => (probeHit = hit))
-        : Promise.resolve(false);
+    // 首包里没被头部吃掉的正文，建连时已经跟着首包写进上游了，这里只作探测样本
+    const leadBuf = headBuf.subarray(head.offset);
 
-    // 下行：socket 可读流套壳后写进响应体；VLESS 要求先回 [版本号, 附加长度]，Trojan 不用
-    const pumpDown = async (controller) => {
+    // 测速用的明文探测（http + 常见 204 地址）本地直接回。
+    // 这类请求走 ProxyIP 时没有 SNI 可供转发，本来也到不了目标，
+    // 硬等上游只会让客户端卡到超时，表现就是延迟 -1
+    const probeHit = head.port === 80 && isProbe204(leadBuf);
+    if (probeHit) cancelled = true;
+
+    // 下行直通：用 IdentityTransformStream 透传，写完立刻出流。
+    // 用普通 ReadableStream 攒包会让客户端迟迟收不到首字节，测速就显示 -1
+    const pump = makePipe();
+    (async () => {
+        const w = pump.writable.getWriter();
+        const put = (chunk) => w.write(chunk).catch(() => {});
         try {
-            if (!head.isTrojan) controller.enqueue(wrap(new Uint8Array([0, 0])));
-            if (await probeP) {
-                controller.enqueue(wrap(LOCAL_204));
-                cancelled = true;
-                try { reader.cancel(); } catch {}
-                try { controller.close(); } catch {}
+            // VLESS 要求先回 [版本号, 附加长度]，Trojan 不用
+            if (!head.isTrojan) await put(wrap(new Uint8Array([0, 0])));
+            if (probeHit) {
+                await put(wrap(LOCAL_204));
                 return;
             }
             const s = await sockPromise;
-            if (!s) { try { controller.close(); } catch {} return; }
+            if (!s) return;
             sock = s;
             const r = s.readable.getReader();
             for (;;) {
                 const { done, value } = await r.read();
                 if (done) break;
-                if (value && value.byteLength) controller.enqueue(wrap(value));
+                if (value && value.byteLength) await put(wrap(value));
             }
         } catch {}
-        try { controller.close(); } catch {}
+        try { await w.close(); } catch {}
         try { sock && sock.close(); } catch {}
-    };
+    })();
 
     // 上行：请求体继续灌进 socket，读完只关写端，不影响下行
     (async () => {
         let w = null;
         try {
-            const s = await sockPromise;
-            const first = await getLead();
             if (probeHit) { try { reader.cancel(); } catch {} return; }
+            const s = await sockPromise;
             if (!s) { try { reader.cancel(); } catch {} return; }
             w = s.writable.getWriter();
-            // 首包正文建连时已写过，只有额外读到的那一包要补写
-            if (leadFresh && first && first.byteLength) await w.write(first);
             for (;;) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -2706,16 +2705,11 @@ async function handleTunnel(req, userConfig, opts, mode) {
 
     // xhttp 回包也带上标识头，回包看着像一个普通 URL，扫描器无从判断这是代理
     const tag = isGrpc ? null : xhttpTag(userConfig && userConfig.uuid);
-    return new Response(new ReadableStream({
-        start(controller) { pumpDown(controller); },
-        cancel() {
-            cancelled = true;
-            try { sock && sock.close(); } catch {}
-        },
-    }), {
+    return new Response(pump.readable, {
         status: 200,
         headers: {
             "content-type": isGrpc ? "application/grpc" : "application/octet-stream",
+            ...(isGrpc ? { "grpc-status": "0" } : {}),
             ...(tag ? { [tag[0]]: `https://x.invalid/?${tag[1]}=${randPad(120 + Math.floor(Math.random() * 780))}` } : {}),
             "cache-control": "no-store",
             "x-accel-buffering": "no",
@@ -2745,12 +2739,10 @@ export default {
             if (!tail) return "d";
             return t === "dp" || t === "ds" ? "d" + tail : tail;
         };
+        // xhttp 与 gRPC 的路由都放在路径最后一段，路径本身不带查询串：
+        // xhttp 开了混淆后查询串会被客户端搬进请求头，路径里再带 ? 只会让各客户端拼出不同的结果
         const buildPathFor = (transport, t, d, s, p) =>
-            transport === "grpc"
-                ? `${getPath()}/${routeSeg(t, p, s)}`
-                : transport === "xhttp"
-                    ? `${getPath()}/${routeSeg(t, p, s)}?${getParam("v")}=${randStr()}`
-                    : buildPath(t, d, s, p);
+            transport === "ws" ? buildPath(t, d, s, p) : `${getPath()}/${routeSeg(t, p, s)}`;
 
         // 传输层参数：ws 走 WebSocket；xhttp 走 stream-one（上下行共用一条 HTTP 流）；grpc 走 gRPC 双向流
         // gRPC 的 mode 只对 Xray 系客户端生效（gun 单流 / multi 多连接复用一条 HTTP/2）
@@ -2760,10 +2752,11 @@ export default {
                 : transport === "grpc" ? `type=grpc&mode=${grpcMode === "multi" ? "multi" : "gun"}`
                     : "type=ws";
         // gRPC 的服务名代替 host/path，其余传输仍然是 host + path
+        // 服务名去掉前导斜杠：客户端自己会拼成 /<服务名>/Tun，带着前导的会拼出 //xxx 双斜杠
         // 服务名不加百分号编码：转换服务对 trojan 的 serviceName 不做解码，编过的会原样带进节点
         const pathParam = (transport, rawPathQuery, workerHost) =>
             transport === "grpc"
-                ? `serviceName=${rawPathQuery}&authority=${workerHost}`
+                ? `serviceName=${rawPathQuery.replace(/^\/+/, "")}&authority=${workerHost}`
                 : `host=${workerHost}&path=${encodeURIComponent(rawPathQuery)}`;
         const buildVlessUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws", grpcMode = "gun") =>
             `vless://${uuid}@${preferredDomain}:${port}?encryption=none&security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode, uuid)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}&fp=chrome#${encodeURIComponent(label || preferredDomain)}`;
@@ -3317,6 +3310,7 @@ export default {
                     });
                     if (env.VTPanel)
                         await env.VTPanel.put("user_config", JSON.stringify(normalized));
+                    cfgCache = null;
                     return json({ success: true, message: "配置保存成功" });
                 } catch {
                     return json({ error: "配置保存失败" }, 500);
@@ -4531,7 +4525,10 @@ async function runAutoUpdate(env, cfg) {
     const changed =
         JSON.stringify(merged.domains) !== JSON.stringify(normalizeDomains(cfg.domains)) ||
         JSON.stringify(merged.proxies) !== JSON.stringify(normalizeProxies(cfg.proxies));
-    if (changed && env.VTPanel) await env.VTPanel.put("user_config", JSON.stringify(merged));
+    if (changed && env.VTPanel) {
+        await env.VTPanel.put("user_config", JSON.stringify(merged));
+        cfgCache = null;
+    }
     return merged;
 }
 
