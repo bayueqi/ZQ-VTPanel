@@ -73,6 +73,14 @@ function parseTrojanRequest(buffer,pwd){
 const text=(c,s=200)=>new Response(c,{status:s,headers:{"content-type":"text/plain; charset=utf-8"}});
 const json=(c,s=200)=>new Response(JSON.stringify(c),{status:s,headers:{"content-type":"application/json; charset=utf-8"}});
 const b64e=(s)=>{const b=new TextEncoder().encode(s);let bin="";for(let i=0;i<b.length;i+=0x8000)bin+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(bin);};
+// gRPC 服务名里放参数的写法用它：URL 安全、无填充
+const b64urlEnc=(s)=>b64e(String(s)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+const b64urlDec=(s)=>{
+    try{
+        const t=String(s).replace(/-/g,"+").replace(/_/g,"/");
+        return atob(t+"=".repeat((4-t.length%4)%4));
+    }catch{return "";}
+};
 const randStr=()=>Math.random().toString(36).slice(2,8);
 const paths=["/static/js","/assets/img","/api/2024","/cdn/file","/upload/data","/media/v2","/lib/ext","/res/now","/stat/click","/track/log","/api/v1/data","/css/main","/js/app","/fonts/google","/images/hero","/videos/intro","/api/v2/user","/assets/css","/static/media","/build/js","/dist/css","/public/img","/content/data","/files/doc","/download/pkg","/api/v3/item","/resource/img"];
 const paramsMap={t:["m","type","mode"],d:["dir","direct","d"],s:["socks","proxy","s"],p:["ip","proxyip","p"],v:["r","rand","v","id","t"]};
@@ -81,6 +89,7 @@ const getParam=(key)=>paramsMap[key][Math.floor(Math.random()*paramsMap[key].len
 
 // ----------- 共享常量和工具 -----------
 const DEFAULT_UUID = "ef9d104e-ca0e-4202-ba4b-a0afb969c747";
+const TRANSPORTS = ["ws", "xhttp", "grpc"];
 const DEFAULT_BEST_IP_API = "https://ipdb.api.030101.xyz/?type=bestcf";
 const DEFAULT_PROXY_API = "https://texturl.520jk.cc.cd/csp";
 const SUPPORTED_PROXY_PROTOCOLS = ["socks5", "http", "https", "sstp"];
@@ -134,7 +143,7 @@ function configForStore(cfg, overrides = {}) {
         autoUpdateProxies: !!m.autoUpdateProxies,
         proxyProtocols: (m.proxyProtocols && m.proxyProtocols.length) ? m.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS,
         protocols: (m.protocols && m.protocols.length) ? m.protocols : ["vless", "trojan"],
-        transport: m.transport === "xhttp" ? "xhttp" : "ws",
+        transport: TRANSPORTS.includes(m.transport) ? m.transport : "ws",
         ech: !!m.ech,
         echConfig: {
             sni: (typeof m.echConfig?.sni === "string" ? m.echConfig.sni.trim() : "") || DEFAULT_ECH_SNI,
@@ -157,7 +166,7 @@ const DEFAULT_CONFIG = {
     proxyApi: DEFAULT_PROXY_API, autoUpdateProxies: false,
     proxyProtocols: SUPPORTED_PROXY_PROTOCOLS,
     protocols: ["vless", "trojan"],
-    transport: "ws",                           // 传输层：ws / xhttp
+    transport: "ws",                           // 传输层：ws / xhttp / grpc
     ech: false, echConfig: { sni: DEFAULT_ECH_SNI, dns: DEFAULT_ECH_DNS },
 };
 
@@ -404,23 +413,27 @@ function clashEchHotPatch(clashYaml, { uuid, echSni, echDns, hosts }) {
 }
 
 // subconverter 能把 VLESS 的 xhttp 原样带出来，但 trojan 会丢掉传输层，
-// 返回前按节点名补齐 network / xhttp-opts
+// 返回前按节点名补齐 network 与对应的 opts（xhttp / grpc）
 function clashTransportHotPatch(clashYaml, { transport, host, pathByLabel }) {
-    if (transport !== "xhttp" || !pathByLabel || !pathByLabel.size) return clashYaml;
+    if (!["xhttp", "grpc"].includes(transport) || !pathByLabel || !pathByLabel.size) return clashYaml;
+    const optsOf = (path) =>
+        transport === "grpc"
+            ? `grpc-opts: {grpc-service-name: ${JSON.stringify(path)}}`
+            : `xhttp-opts: {path: ${JSON.stringify(path)}, host: ${JSON.stringify(host)}, mode: stream-one}`;
     return clashYaml.replace(/^[ \t]*-[ \t]*\{[^\n]*\}[ \t]*$/gm, (line) => {
         const m = line.match(/name:\s*("([^"]*)"|([^,}]+))/);
         if (!m) return line;
         const label = (m[2] !== undefined ? m[2] : m[3] || "").trim();
         const path = pathByLabel.get(label);
         if (!path) return line;
-        if (/network:\s*xhttp/.test(line)) return line;
+        if (new RegExp(`network:\\s*${transport}\\b`).test(line)) return line;
         if (/network:\s*\w+/.test(line)) {
             return line
-                .replace(/network:\s*\w+/, "network: xhttp")
-                .replace(/,?\s*ws-opts:\s*\{[^{}]*\}/g, "");
+                .replace(/network:\s*\w+/, `network: ${transport}`)
+                .replace(/,?\s*\w+-opts:\s*\{[^{}]*\}/g, "")
+                .replace(/\}$/, `, ${optsOf(path)}}`);
         }
-        const extra = `, network: xhttp, xhttp-opts: {path: ${JSON.stringify(path)}, host: ${JSON.stringify(host)}, mode: stream-one}`;
-        return line.replace(/\}$/, `${extra}}`);
+        return line.replace(/\}$/, `, network: ${transport}, ${optsOf(path)}}`);
     });
 }
 
@@ -2349,6 +2362,21 @@ function parseXhttpHead(raw, uuid) {
     return { state: "ok", isTrojan: true, hostname: r.addr, port, isUDP: cmd === 3, offset: r.pos + 4 };
 }
 
+// xhttp 与 gRPC 共用：按 t/d/s/p 决定的顺序连目标，首包一起带过去
+async function connectByOrder(head, opts, payload) {
+    for (const type of opts.getOrder()) {
+        try {
+            if (type === "direct") return await connectDirect(head.hostname, head.port, payload);
+            if (type === "s5" && opts.proxyConfig) return await connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
+            if (type === "proxy" && opts.PROXY_IP) {
+                const [ph, pp = head.port] = opts.PROXY_IP.split(":");
+                return await connectDirect(ph, +pp || head.port, payload);
+            }
+        } catch {}
+    }
+    return null;
+}
+
 // 一个 POST 承载上下行：请求体灌进 socket，socket 的可读流直接当响应体吐出去
 async function handleXhttp(req, userConfig, opts) {
     if (!req.body) return new Response("bad request", { status: 400 });
@@ -2370,19 +2398,8 @@ async function handleXhttp(req, userConfig, opts) {
     // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
     if (head.state !== "ok" || head.isUDP) return fail(400);
 
-    const payload = buf.subarray(head.offset);
-    let sock = null;
-    for (const type of opts.getOrder()) {
-        try {
-            if (type === "direct") sock = await connectDirect(head.hostname, head.port, payload);
-            else if (type === "s5" && opts.proxyConfig) sock = await connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
-            else if (type === "proxy" && opts.PROXY_IP) {
-                const [ph, pp = head.port] = opts.PROXY_IP.split(":");
-                sock = await connectDirect(ph, +pp || head.port, payload);
-            }
-        } catch {}
-        if (sock) break;
-    }
+    // 靠首包解出的目标，按 t/d/s/p 决定的顺序逐个试，第一个连上就用它
+    const sock = await connectByOrder(head, opts, buf.subarray(head.offset));
     if (!sock) return fail(502);
 
     // 上行：剩下的请求体继续灌进 socket，读完只关写端，不影响下行
@@ -2426,6 +2443,125 @@ async function handleXhttp(req, userConfig, opts) {
     });
 }
 
+// ---------- gRPC ----------
+// 帧格式：5 字节头（1 字节压缩标志 + 4 字节大端长度）+ 消息体，消息体是 protobuf 的字段 1（0x0a + 变长长度 + 数据）
+function grpcFrame(chunk) {
+    const varint = [];
+    let n = chunk.byteLength >>> 0;
+    while (n > 127) { varint.push((n & 0x7f) | 0x80); n >>>= 7; }
+    varint.push(n);
+    const msgLen = 1 + varint.length + chunk.byteLength;
+    const frame = new Uint8Array(5 + msgLen);
+    frame[1] = (msgLen >>> 24) & 0xff;
+    frame[2] = (msgLen >>> 16) & 0xff;
+    frame[3] = (msgLen >>> 8) & 0xff;
+    frame[4] = msgLen & 0xff;
+    frame[5] = 0x0a;
+    frame.set(varint, 6);
+    frame.set(chunk, 6 + varint.length);
+    return frame;
+}
+
+function grpcUnwrap(payload) {
+    if (payload.byteLength < 2 || payload[0] !== 0x0a) return payload;
+    let pos = 1, shift = 0;
+    while (pos < payload.byteLength) {
+        const cur = payload[pos++];
+        if ((cur & 0x80) === 0) return payload.subarray(pos);
+        shift += 7;
+        if (shift > 35) break;
+    }
+    return payload;
+}
+
+// gRPC 没有查询串，模式写在路径最后一段：…/d、…/p-<base64url>、…/s-<base64url>
+function grpcRoute(u) {
+    const seg = u.pathname.split("/").filter(Boolean).pop() || "";
+    if (seg === "d") return { getOrder: () => ["direct"] };
+    if (seg.length > 2 && seg[1] === "-") {
+        const val = b64urlDec(seg.slice(2));
+        if (!val) return null;
+        if (seg[0] === "p") return { PROXY_IP: val, getOrder: () => ["proxy", "direct"] };
+        if (seg[0] === "s") {
+            const cfg = parseProxyAddress(val);
+            if (cfg) return { proxyConfig: cfg, getOrder: () => ["s5"] };
+        }
+    }
+    return null;
+}
+
+// 一个 POST 之内用 gRPC 帧承载双向流
+async function handleGrpc(req, userConfig, opts) {
+    if (!req.body) return new Response("bad request", { status: 400 });
+    const reader = req.body.getReader();
+    const st = { sock: null, controller: null };
+    const body = new ReadableStream({
+        start(c) { st.controller = c; },
+        cancel() { try { st.sock && st.sock.close(); } catch {} },
+    });
+    const fail = (status) => {
+        reader.cancel().catch(() => {});
+        try { st.sock && st.sock.close(); } catch {}
+        try { st.controller.close(); } catch {}
+        return new Response("bad request", { status });
+    };
+
+    // 下行：读 socket，逐块套帧写进响应体；VLESS 要求先回 [版本号, 附加长度]
+    const pumpDown = async (sock, isTrojan) => {
+        const r = sock.readable.getReader();
+        try {
+            if (!isTrojan) st.controller.enqueue(grpcFrame(new Uint8Array([0, 0])));
+            for (;;) {
+                const { done, value } = await r.read();
+                if (done) break;
+                if (value && value.byteLength) st.controller.enqueue(grpcFrame(value));
+            }
+        } catch {}
+        try { st.controller.close(); } catch {}
+    };
+
+    let pending = new Uint8Array(0), headBuf = new Uint8Array(0), w = null;
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value || !value.byteLength) continue;
+            pending = pending.byteLength ? concatBytes(pending, value) : new Uint8Array(value);
+            while (pending.byteLength >= 5) {
+                const size = 5 + (((pending[1] << 24) >>> 0) | (pending[2] << 16) | (pending[3] << 8) | pending[4]);
+                if (pending.byteLength < size) break;
+                const payload = grpcUnwrap(pending.subarray(5, size));
+                pending = pending.slice(size);
+                if (!payload.byteLength) continue;
+                if (w) { await w.write(payload); continue; }
+
+                // 还没建连：把解出来的数据攒成首包，够解析了再连
+                headBuf = headBuf.byteLength ? concatBytes(headBuf, payload) : payload;
+                if (headBuf.byteLength > 16384) return fail(400);
+                const head = parseXhttpHead(headBuf, userConfig.uuid);
+                if (head.state === "bad") return fail(400);
+                if (head.state !== "ok") continue;
+                // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
+                if (head.isUDP) return fail(400);
+                st.sock = await connectByOrder(head, opts, headBuf.subarray(head.offset));
+                if (!st.sock) return fail(502);
+                w = st.sock.writable.getWriter();
+                pumpDown(st.sock, head.isTrojan);
+            }
+        }
+    } catch {}
+    try { w && (await w.close()); } catch {}
+
+    return new Response(body, {
+        status: 200,
+        headers: {
+            "content-type": "application/grpc",
+            "grpc-status": "0",
+            "cache-control": "no-store",
+        },
+    });
+}
+
 export default {
     async fetch(req, env) {
 
@@ -2439,13 +2575,27 @@ export default {
             return `${getPath()}?${params.join("&")}`;
         };
 
-        // 传输层参数：ws 走 WebSocket；xhttp 走 stream-one（上下行共用一条 HTTP 流）
+        // gRPC 没有查询串，模式写进路径最后一段；其余传输沿用上面的查询串写法
+        const buildPathFor = (transport, t, d, s, p) =>
+            transport === "grpc"
+                ? `${getPath()}/${p ? "p-" + b64urlEnc(p) : s ? "s-" + b64urlEnc(s) : "d"}`
+                : buildPath(t, d, s, p);
+
+        // 传输层参数：ws 走 WebSocket；xhttp 走 stream-one（上下行共用一条 HTTP 流）；grpc 走 gRPC 双向流
         const transportQuery = (transport) =>
-            transport === "xhttp" ? "type=xhttp&mode=stream-one" : "type=ws";
+            transport === "xhttp" ? "type=xhttp&mode=stream-one"
+                : transport === "grpc" ? "type=grpc&mode=gun"
+                    : "type=ws";
+        // gRPC 的服务名代替 host/path，其余传输仍然是 host + path
+        // 服务名不加百分号编码：转换服务对 trojan 的 serviceName 不做解码，编过的会原样带进节点
+        const pathParam = (transport, rawPathQuery, workerHost) =>
+            transport === "grpc"
+                ? `serviceName=${rawPathQuery}&authority=${workerHost}`
+                : `host=${workerHost}&path=${encodeURIComponent(rawPathQuery)}`;
         const buildVlessUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws") =>
-            `vless://${uuid}@${preferredDomain}:${port}?encryption=none&security=tls&sni=${workerHost}&${transportQuery(transport)}${echParam}&host=${workerHost}&path=${encodeURIComponent(rawPathQuery)}&fp=chrome#${encodeURIComponent(label || preferredDomain)}`;
+            `vless://${uuid}@${preferredDomain}:${port}?encryption=none&security=tls&sni=${workerHost}&${transportQuery(transport)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}&fp=chrome#${encodeURIComponent(label || preferredDomain)}`;
         const buildTrojanUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws") =>
-            `trojan://${uuid}@${preferredDomain}:${port}?security=tls&sni=${workerHost}&${transportQuery(transport)}${echParam}&host=${workerHost}&path=${encodeURIComponent(rawPathQuery)}#${encodeURIComponent(label || preferredDomain)}`;
+            `trojan://${uuid}@${preferredDomain}:${port}?security=tls&sni=${workerHost}&${transportQuery(transport)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}#${encodeURIComponent(label || preferredDomain)}`;
 
         // 取 workerHost / 优选IP(domains) / 入口地址(entries)；入口地址为空时用本项目域名
         const getDomains = (request, cfg) => {
@@ -2463,15 +2613,16 @@ export default {
             const nodes = [];
             const proxies = cfg.proxies || [];
             const proxyIps = cfg.proxyIps || [];
+            const t = cfg.transport;
             for (const d of lists.domains) {
                 const a = splitHostPort(d.ip);
                 const host = nodeHost(a.host);
                 if (proxyIps.length) {
                     // 填了 ProxyIP：只出「优选IP × ProxyIP」回退节点，不再单独出优选IP直连节点
                     for (const p of proxyIps)
-                        nodes.push({ label: d.remark || d.ip, raw: buildPath("p", 1, null, p), addr: host, port: a.port });
+                        nodes.push({ label: d.remark || d.ip, raw: buildPathFor(t, "p", 1, null, p), addr: host, port: a.port });
                 } else {
-                    nodes.push({ label: d.remark || d.ip, raw: buildPath("d", 1, null, null), addr: host, port: a.port });
+                    nodes.push({ label: d.remark || d.ip, raw: buildPathFor(t, "d", 1, null, null), addr: host, port: a.port });
                 }
             }
             for (const e of lists.entries) {
@@ -2480,8 +2631,8 @@ export default {
                 for (const pr of proxies) {
                     const name = pr.remark || proxyTypeLabel(pr.proxy);
                     nodes.push(cfg.globalProxy
-                        ? { label: name, raw: buildPath("s", null, pr.proxy, null), addr: host, port: a.port }
-                        : { label: name, raw: buildPath("p", 1, pr.proxy, null), addr: host, port: a.port });
+                        ? { label: name, raw: buildPathFor(t, "s", null, pr.proxy, null), addr: host, port: a.port }
+                        : { label: name, raw: buildPathFor(t, "p", 1, pr.proxy, null), addr: host, port: a.port });
                 }
             }
             return nodes;
@@ -2844,6 +2995,13 @@ export default {
 
         const url = normalizeQueryPath(new URL(req.url));
 
+        // gRPC：客户端带 application/grpc 发起双向流，路径最后一段标识回退方式
+        if (req.method === "POST" && req.body &&
+            (req.headers.get("content-type") || "").toLowerCase().startsWith("application/grpc")) {
+            const userConfig = await getUserConfig(env);
+            return await handleGrpc(req, userConfig, grpcRoute(url) || resolveRoute(url));
+        }
+
         // XHTTP：POST 到 paths 里的伪装路径，一个请求同时承载上行和下行
         if (req.method === "POST" && req.body && paths.includes(url.pathname)) {
             return await handleXhttp(req, await getUserConfig(env), resolveRoute(url));
@@ -3000,9 +3158,10 @@ export default {
             // "surge&ver=4" 这类带参数的 target 先按 & 截断再取端点
             const 端点名 = String(订阅类型).split("&")[0].trim().toLowerCase();
             const target = SUBCONVERTER_TARGETS[端点名];
-            // sing-box / surge / loon / quanx 没有 xhttp，转换后节点会被丢掉，这几类退回 ws
-            const nodeTransport = userConfig.transport === "xhttp" &&
-                !["singbox", "surge", "loon", "quanx"].includes(端点名) ? "xhttp" : "ws";
+            // surge / loon / quanx 没有 xhttp 和 grpc，sing-box 没有 xhttp：这几类转换后节点会被丢掉，退回 ws
+            const cfgTransport = TRANSPORTS.includes(userConfig.transport) ? userConfig.transport : "ws";
+            const nodeTransport = ["surge", "loon", "quanx"].includes(端点名) ||
+                (端点名 === "singbox" && cfgTransport === "xhttp") ? "ws" : cfgTransport;
             const echParam = buildEchParam(userConfig);
             // 收集所有节点使用的域名（排除纯 IP），用于 ECH nameserver-policy 走 DoH 解析
             const echHosts = [...new Set(
@@ -3364,6 +3523,12 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .proto-pill{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border:1px solid var(--border);border-radius:12px;background:#fff;cursor:pointer;user-select:none;font-weight:600;font-size:14px;color:var(--text);transition:border-color .2s,background-color .2s}
 .proto-pill input{display:none}
 .proto-pill.on{border-color:var(--primary);background:#eff6ff;box-shadow:0 0 0 3px rgba(37,99,235,.10)}
+.help-dot{width:18px;height:18px;padding:0;margin-left:6px;border:1px solid var(--border);border-radius:50%;background:#fff;color:var(--muted);font-size:12px;font-weight:700;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;vertical-align:2px;box-shadow:none}
+.help-dot:hover{border-color:var(--primary);color:var(--primary)}
+.help-body{text-align:left;font-size:14px;color:var(--text);line-height:1.9}
+.help-body b{color:var(--primary)}
+.help-body ol{margin:8px 0 0;padding-left:20px}
+.help-tip{margin-top:14px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:12px 14px;color:#b91c1c;font-size:13px}
 .qr-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(30,58,95,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:1000;align-items:center;justify-content:center;padding:20px}
 .qr-modal.active{display:flex}
 .qr-content{background:var(--glass-strong);border-radius:24px;padding:32px;text-align:center;max-width:400px;width:100%;box-shadow:var(--shadow-lg);border:1px solid var(--line);position:relative;backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);animation:rise .35s ease}
@@ -3449,10 +3614,11 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						</div>
 					</div>
 					<div class="form-group">
-						<label>传输类型</label>
+						<label>传输类型<button type="button" class="help-dot" id="transportHelp" aria-label="传输类型说明">?</button></label>
 						<div class="proto-pills">
 							<div class="proto-pill trans-pill on" data-transport="ws"><input type="radio" name="transport" value="ws" checked>WebSocket</div>
 							<div class="proto-pill trans-pill" data-transport="xhttp"><input type="radio" name="transport" value="xhttp">XHTTP</div>
+							<div class="proto-pill trans-pill" data-transport="grpc"><input type="radio" name="transport" value="grpc">gRPC</div>
 						</div>
 					</div>
 					<div class="form-group">
@@ -3589,6 +3755,22 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 				<button class="qr-close" id="closeQrBtn">关闭</button>
 			</div>
 		</div>
+		<div class="qr-modal" id="transportModal">
+			<div class="qr-content">
+				<div class="qr-title">传输类型说明</div>
+				<div class="help-body">
+					<b>WebSocket</b>：无需额外设置，所有客户端都支持。<br>
+					<b>XHTTP</b>：需要客户端支持，mihomo 1.19.22 起、Xray 系新版可用。<br>
+					<b>gRPC</b>：需要客户端支持（mihomo、Xray、v2rayN 均可），并且满足下面两点。
+					<ol>
+						<li>项目部署在 Workers，不是 Pages。</li>
+						<li>在 Cloudflare 面板为当前域名开启 gRPC。</li>
+					</ol>
+				</div>
+				<div class="help-tip">网络（Network）&gt; gRPC &gt; 开启</div>
+				<button class="qr-close" id="closeTransportBtn">我知道了</button>
+			</div>
+		</div>
 		<div class="toast" id="toast"></div>
 		<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 		<script>
@@ -3631,6 +3813,12 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 				});
 				document.getElementById('closeQrBtn').addEventListener('click', function () { document.getElementById('qrModal').classList.remove('active'); });
 				document.getElementById('qrModal').addEventListener('click', function (e) { if (e.target === document.getElementById('qrModal')) document.getElementById('qrModal').classList.remove('active'); });
+
+				// 传输类型说明
+				var transportModal = document.getElementById('transportModal');
+				document.getElementById('transportHelp').addEventListener('click', function () { transportModal.classList.add('active'); });
+				document.getElementById('closeTransportBtn').addEventListener('click', function () { transportModal.classList.remove('active'); });
+				transportModal.addEventListener('click', function (e) { if (e.target === transportModal) transportModal.classList.remove('active'); });
 
 				// 折叠（通用，含内层）：max-height 精确过渡，过渡结束后置 none，
 				// 这样列表增删、内层展开都不会再把内容裁掉
@@ -3781,7 +3969,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							p.classList.toggle('on', cb.checked);
 						});
 
-						var trans = cfg.transport === 'xhttp' ? 'xhttp' : 'ws';
+						var trans = ['ws', 'xhttp', 'grpc'].indexOf(cfg.transport) >= 0 ? cfg.transport : 'ws';
 						document.querySelectorAll('.trans-pill').forEach(function (p) {
 							var cb = p.querySelector('input');
 							cb.checked = (cb.value === trans);
