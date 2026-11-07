@@ -2667,9 +2667,9 @@ export default {
             return out;
         };
 
-        // 节点名：协议-传输-备注，如 V-W-香港 / T-G-日本
+        // 节点名：协议-传输 备注，如 `V-W 香港` / `T-G 日本`
         const nodeName = (proto, transport, label) =>
-            `${proto}-${TRANSPORT_BADGE[transport] || "W"}-${label}`;
+            `${proto}-${TRANSPORT_BADGE[transport] || "W"} ${label}`;
 
         if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
             const u = normalizeQueryPath(new URL(req.url));
