@@ -2566,9 +2566,14 @@ function grpcSlicer() {
 
 // 隧道传输的回退方式写在路径最后一段：d、p-<base64url>、s-<base64url>，
 // 前面加 d 表示先直连、失败再回退（dp- / ds-）
-// gRPC 客户端实际请求的是 <服务名>/Tun（multi 模式为 /TunMulti），所以要先去掉这个方法名
+// gRPC 客户端实际请求的是 <服务名>/Tun（multi 模式为 /TunMulti），所以要先去掉这个方法名；
+// 服务名里的 / 会被客户端编码成 %2F 发出来，不还原就整段拼在一起，回退信息全丢
 function grpcRoute(u) {
-    const segs = u.pathname.split("/").filter(Boolean);
+    let path = u.pathname;
+    if (path.includes("%")) {
+        try { path = decodeURIComponent(path); } catch {}
+    }
+    const segs = path.split("/").filter(Boolean);
     if (/^tun(multi)?$/i.test(segs[segs.length - 1] || "")) segs.pop();
     for (let i = segs.length - 1; i >= 0; i--) {
         const seg = segs[i];
