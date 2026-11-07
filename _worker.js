@@ -90,6 +90,22 @@ const getParam=(key)=>paramsMap[key][Math.floor(Math.random()*paramsMap[key].len
 // ----------- 共享常量和工具 -----------
 const DEFAULT_UUID = "ef9d104e-ca0e-4202-ba4b-a0afb969c747";
 const TRANSPORTS = ["ws", "xhttp", "grpc"];
+// 节点名后缀用，多选传输时同名节点会冲突
+const TRANSPORT_LABEL = { ws: "WS", xhttp: "XHTTP", grpc: "gRPC" };
+// 客户端各端点支持的传输层：sing-box 没有 xhttp，surge / loon / quanx 只认 ws
+const TRANSPORT_UNSUPPORTED = {
+    singbox: ["xhttp"],
+    surge: ["xhttp", "grpc"],
+    loon: ["xhttp", "grpc"],
+    quanx: ["xhttp", "grpc"],
+};
+// 新版存 transports 数组，旧配置只有单个 transport，一并兼容
+const normalizeTransports = (m) => {
+    const src = Array.isArray(m && m.transports) ? m.transports
+        : (m && typeof m.transport === "string" ? [m.transport] : []);
+    const out = TRANSPORTS.filter((t) => src.includes(t));
+    return out.length ? out : ["ws"];
+};
 const DEFAULT_BEST_IP_API = "https://ipdb.api.030101.xyz/?type=bestcf";
 const DEFAULT_PROXY_API = "https://texturl.520jk.cc.cd/csp";
 const SUPPORTED_PROXY_PROTOCOLS = ["socks5", "http", "https", "sstp"];
@@ -143,7 +159,7 @@ function configForStore(cfg, overrides = {}) {
         autoUpdateProxies: !!m.autoUpdateProxies,
         proxyProtocols: (m.proxyProtocols && m.proxyProtocols.length) ? m.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS,
         protocols: (m.protocols && m.protocols.length) ? m.protocols : ["vless", "trojan"],
-        transport: TRANSPORTS.includes(m.transport) ? m.transport : "ws",
+        transports: normalizeTransports(m),
         grpcMode: m.grpcMode === "multi" ? "multi" : "gun",
         grpcUA: typeof m.grpcUA === "string" ? m.grpcUA.trim().slice(0, 256) : "",
         ech: !!m.ech,
@@ -168,7 +184,7 @@ const DEFAULT_CONFIG = {
     proxyApi: DEFAULT_PROXY_API, autoUpdateProxies: false,
     proxyProtocols: SUPPORTED_PROXY_PROTOCOLS,
     protocols: ["vless", "trojan"],
-    transport: "ws",                           // 传输层：ws / xhttp / grpc
+    transports: ["ws"],                        // 传输层，可多选：ws / xhttp / grpc
     grpcMode: "gun",                           // gRPC 模式：gun 单流 / multi 多连接复用一条 HTTP/2
     grpcUA: "",                                // gRPC 客户端 UA，留空用客户端自带
     ech: false, echConfig: { sni: DEFAULT_ECH_SNI, dns: DEFAULT_ECH_DNS },
@@ -430,38 +446,38 @@ function clashEchHotPatch(clashYaml, { uuid, echSni, echDns, hosts }) {
 }
 
 // subconverter 能把 VLESS 的 xhttp 原样带出来，但 trojan 会丢掉传输层，
-// 返回前按节点名补齐 network 与对应的 opts（xhttp / grpc）
-function clashTransportHotPatch(clashYaml, { transport, host, pathByLabel, grpcUA }) {
-    if (!["xhttp", "grpc"].includes(transport) || !pathByLabel || !pathByLabel.size) return clashYaml;
-    const ua = transport === "grpc" && typeof grpcUA === "string" ? grpcUA.trim() : "";
-    const optsOf = (path) =>
-        transport === "grpc"
-            ? `grpc-opts: {grpc-service-name: ${JSON.stringify(path)}${ua ? `, grpc-user-agent: ${JSON.stringify(ua)}` : ""}}`
-            : `xhttp-opts: {path: ${JSON.stringify(path)}, host: ${JSON.stringify(host)}, mode: stream-one}`;
+// 返回前按节点名补齐 network 与对应的 opts（xhttp / grpc）；多选传输时每个节点各自补
+function clashTransportHotPatch(clashYaml, { host, byLabel, grpcUA }) {
+    if (!byLabel || !byLabel.size) return clashYaml;
+    const ua = typeof grpcUA === "string" ? grpcUA.trim() : "";
     const patched = clashYaml.replace(/^[ \t]*-[ \t]*\{[^\n]*\}[ \t]*$/gm, (line) => {
         const m = line.match(/name:\s*("([^"]*)"|([^,}]+))/);
         if (!m) return line;
         const label = (m[2] !== undefined ? m[2] : m[3] || "").trim();
-        const path = pathByLabel.get(label);
-        if (!path) return line;
+        const info = byLabel.get(label);
+        if (!info || info.transport === "ws") return line;
+        const { transport, path } = info;
         // 已经是 grpc 的节点只需要补 UA（subconverter 能带回 network / service-name，但带不出 UA）
-        if (ua && /network:\s*grpc/.test(line)) {
+        if (transport === "grpc" && ua && /network:\s*grpc/.test(line)) {
             if (/grpc-user-agent/.test(line)) return line;
             if (/grpc-opts:\s*\{/.test(line))
                 return line.replace(/grpc-opts:\s*\{/, `grpc-opts: {grpc-user-agent: ${JSON.stringify(ua)}, `);
             return line.replace(/\}$/, `, grpc-opts: {grpc-user-agent: ${JSON.stringify(ua)}}}`);
         }
         if (new RegExp(`network:\\s*${transport}\\b`).test(line)) return line;
+        const optsOf = transport === "grpc"
+            ? `grpc-opts: {grpc-service-name: ${JSON.stringify(path)}${ua ? `, grpc-user-agent: ${JSON.stringify(ua)}` : ""}}`
+            : `xhttp-opts: {path: ${JSON.stringify(path)}, host: ${JSON.stringify(host)}, mode: stream-one}`;
         if (/network:\s*\w+/.test(line)) {
             return line
                 .replace(/network:\s*\w+/, `network: ${transport}`)
                 .replace(/,?\s*\w+-opts:\s*\{[^{}]*\}/g, "")
-                .replace(/\}$/, `, ${optsOf(path)}}`);
+                .replace(/\}$/, `, ${optsOf}}`);
         }
-        return line.replace(/\}$/, `, network: ${transport}, ${optsOf(path)}}`);
+        return line.replace(/\}$/, `, network: ${transport}, ${optsOf}}`);
     });
     // subconverter 会把 Xray 的 mode 参数翻成 grpc-mode，mihomo 没有这个字段，留着只会干扰
-    return transport === "grpc" ? patched.replace(/,?\s*grpc-mode:\s*[A-Za-z0-9_-]+/g, "") : patched;
+    return patched.replace(/,?\s*grpc-mode:\s*[A-Za-z0-9_-]+/g, "");
 }
 
 function singboxEchHotPatch(singboxText, { uuid, echSni }) {
@@ -601,6 +617,8 @@ async function getUserConfig(env) {
         m.autoUpdateProxies = !!m.autoUpdateProxies;
         m.proxyProtocols = (Array.isArray(m.proxyProtocols) && m.proxyProtocols.length) ? m.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS;
         if (!Array.isArray(m.protocols) || !m.protocols.length) m.protocols = ["vless", "trojan"];
+        // 旧配置只有单个 transport，读出来时统一成数组
+        m.transports = normalizeTransports(m);
         m.ech = !!m.ech;
         if (!m.echConfig || typeof m.echConfig !== "object" || Array.isArray(m.echConfig)) m.echConfig = {};
         let echSni = typeof m.echConfig.sni === "string" ? m.echConfig.sni.trim() : "";
@@ -2598,23 +2616,23 @@ export default {
             return { workerHost, domains, entries };
         };
 
-        // 生成全部节点（label/raw/addr/port）。raw 里的 d/s/p 参数决定隧道回退顺序。
+        // 生成基础节点（label/params/addr/port）。params 是 buildPathFor 的 route 参数，
+        // 具体路径要等选定的传输层确定后再拼，所以这里不落 raw。
         // 裸 IPv6 补上方括号，否则拼出来的 URI 不合法
         const nodeHost = (h) => (h.includes(":") && !h.startsWith("[") ? `[${h}]` : h);
         const buildNodes = (cfg, lists) => {
             const nodes = [];
             const proxies = cfg.proxies || [];
             const proxyIps = cfg.proxyIps || [];
-            const t = cfg.transport;
             for (const d of lists.domains) {
                 const a = splitHostPort(d.ip);
                 const host = nodeHost(a.host);
                 if (proxyIps.length) {
                     // 填了 ProxyIP：只出「优选IP × ProxyIP」回退节点，不再单独出优选IP直连节点
                     for (const p of proxyIps)
-                        nodes.push({ label: d.remark || d.ip, raw: buildPathFor(t, "p", 1, null, p), addr: host, port: a.port });
+                        nodes.push({ label: d.remark || d.ip, params: ["p", 1, null, p], addr: host, port: a.port });
                 } else {
-                    nodes.push({ label: d.remark || d.ip, raw: buildPathFor(t, "d", 1, null, null), addr: host, port: a.port });
+                    nodes.push({ label: d.remark || d.ip, params: ["d", 1, null, null], addr: host, port: a.port });
                 }
             }
             for (const e of lists.entries) {
@@ -2623,11 +2641,30 @@ export default {
                 for (const pr of proxies) {
                     const name = pr.remark || proxyTypeLabel(pr.proxy);
                     nodes.push(cfg.globalProxy
-                        ? { label: name, raw: buildPathFor(t, "s", null, pr.proxy, null), addr: host, port: a.port }
-                        : { label: name, raw: buildPathFor(t, "p", 1, pr.proxy, null), addr: host, port: a.port });
+                        ? { label: name, params: ["s", null, pr.proxy, null], addr: host, port: a.port }
+                        : { label: name, params: ["p", 1, pr.proxy, null], addr: host, port: a.port });
                 }
             }
             return nodes;
+        };
+
+        // 每个基础节点 × 每个传输层各出一个；多选时节点名加传输后缀，避免同名冲突
+        const expandNodes = (nodes, transports) => {
+            const list = transports.length ? transports : ["ws"];
+            const multi = list.length > 1;
+            const out = [];
+            for (const n of nodes) {
+                for (const t of list) {
+                    out.push({
+                        label: multi ? `${n.label} · ${TRANSPORT_LABEL[t]}` : n.label,
+                        transport: t,
+                        raw: buildPathFor(t, ...n.params),
+                        addr: n.addr,
+                        port: n.port,
+                    });
+                }
+            }
+            return out;
         };
 
         if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
@@ -3114,7 +3151,6 @@ export default {
             // 拉取失败或超时返回 null，沿用手上的配置继续响应
             userConfig = (await maybeAutoUpdate(env, userConfig)) || userConfig;
             const lists = getDomains(req, userConfig);
-            const nodes = buildNodes(userConfig, lists);
             const ua = (req.headers.get("User-Agent") || "").toLowerCase();
             const isSubConverterRequest =
                 url.searchParams.has("b64") ||
@@ -3150,10 +3186,11 @@ export default {
             // "surge&ver=4" 这类带参数的 target 先按 & 截断再取端点
             const 端点名 = String(订阅类型).split("&")[0].trim().toLowerCase();
             const target = SUBCONVERTER_TARGETS[端点名];
-            // surge / loon / quanx 没有 xhttp 和 grpc，sing-box 没有 xhttp：这几类转换后节点会被丢掉，退回 ws
-            const cfgTransport = TRANSPORTS.includes(userConfig.transport) ? userConfig.transport : "ws";
-            const nodeTransport = ["surge", "loon", "quanx"].includes(端点名) ||
-                (端点名 === "singbox" && cfgTransport === "xhttp") ? "ws" : cfgTransport;
+            // 端点不支持的传输层直接剔除（surge/loon/quanx 只认 ws，sing-box 没有 xhttp），
+            // 一个都不剩时退回 ws，订阅不至于空掉
+            const 不可用 = TRANSPORT_UNSUPPORTED[端点名] || [];
+            const 可用传输 = userConfig.transports.filter((t) => !不可用.includes(t));
+            const nodes = expandNodes(buildNodes(userConfig, lists), 可用传输.length ? 可用传输 : ["ws"]);
             const echParam = buildEchParam(userConfig);
             // 收集所有节点使用的域名（排除纯 IP），用于 ECH nameserver-policy 走 DoH 解析
             const echHosts = [...new Set(
@@ -3163,18 +3200,18 @@ export default {
             )];
             const echSni = userConfig.echConfig?.sni || "";
             const echDns = userConfig.echConfig?.dns || "";
-            // 节点名 -> 原始 path：clash 转换后补传输层用
+            // 节点名 -> {传输层, 原始 path}：clash 转换后补传输层用
             const transportPaths = new Map();
             for (const n of nodes) {
                 if (protocols.includes("vless")) {
                     const name = "V " + n.label;
-                    transportPaths.set(name, n.raw);
-                    out.push(buildVlessUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, nodeTransport, userConfig.grpcMode));
+                    transportPaths.set(name, { transport: n.transport, path: n.raw });
+                    out.push(buildVlessUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 }
                 if (protocols.includes("trojan")) {
                     const name = "T " + n.label;
-                    transportPaths.set(name, n.raw);
-                    out.push(buildTrojanUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, nodeTransport, userConfig.grpcMode));
+                    transportPaths.set(name, { transport: n.transport, path: n.raw });
+                    out.push(buildTrojanUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 }
             }
             const nodesContent = out.join("\n");
@@ -3230,9 +3267,8 @@ export default {
                     // dns 段与 ECH 无关，任何情况都要补，否则客户端退回明文解析
                     转换后内容 = ensureClashDns(转换后内容);
                     转换后内容 = clashTransportHotPatch(转换后内容, {
-                        transport: nodeTransport,
                         host: lists.workerHost,
-                        pathByLabel: transportPaths,
+                        byLabel: transportPaths,
                         grpcUA: userConfig.grpcUA,
                     });
                     if (userConfig.ech)
@@ -3421,7 +3457,7 @@ export default {
             const origin = new URL(req.url).origin;
             const subUrl = `${origin}/sub?pwd=${userUUID}`;
             const lists = getDomains(req, userConfig);
-            const nodes = buildNodes(userConfig, lists);
+            const nodes = expandNodes(buildNodes(userConfig, lists), userConfig.transports);
             const allNodeUris = [];
             const protocols = Array.isArray(userConfig.protocols) && userConfig.protocols.length > 0
                 ? userConfig.protocols
@@ -3429,9 +3465,9 @@ export default {
             const echParam = buildEchParam(userConfig);
             for (const n of nodes) {
                 if (protocols.includes("vless"))
-                    allNodeUris.push(buildVlessUri(n.raw, userUUID, "V " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, userConfig.transport, userConfig.grpcMode));
+                    allNodeUris.push(buildVlessUri(n.raw, userUUID, "V " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 if (protocols.includes("trojan"))
-                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, "T " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, userConfig.transport, userConfig.grpcMode));
+                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, "T " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
             }
             const allNodesJson = JSON.stringify(allNodeUris);
             const html = `
@@ -3622,9 +3658,9 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					<div class="form-group">
 						<label>传输类型<button type="button" class="help-dot" id="transportHelp" aria-label="传输类型说明">?</button></label>
 						<div class="proto-pills">
-							<div class="proto-pill trans-pill on" data-transport="ws"><input type="radio" name="transport" value="ws" checked>WebSocket</div>
-							<div class="proto-pill trans-pill" data-transport="xhttp"><input type="radio" name="transport" value="xhttp">XHTTP</div>
-							<div class="proto-pill trans-pill" data-transport="grpc"><input type="radio" name="transport" value="grpc">gRPC</div>
+							<div class="proto-pill trans-pill on" data-transport="ws"><input type="checkbox" name="transports" value="ws" checked>WebSocket</div>
+							<div class="proto-pill trans-pill" data-transport="xhttp"><input type="checkbox" name="transports" value="xhttp">XHTTP</div>
+							<div class="proto-pill trans-pill" data-transport="grpc"><input type="checkbox" name="transports" value="grpc">gRPC</div>
 						</div>
 					</div>
 					<div class="form-group grpc-only" id="grpcModeGroup">
@@ -3898,24 +3934,24 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					});
 				});
 
-				// gRPC 专属项只在选中 gRPC 时显示
+				// gRPC 专属项只在勾选 gRPC 时显示
 				function syncGrpcFields() {
-					var sel = (document.querySelector('.trans-pill input:checked') || {}).value;
+					var on = Array.prototype.some.call(
+						document.querySelectorAll('.trans-pill input:checked'),
+						function (cb) { return cb.value === 'grpc'; }
+					);
 					document.querySelectorAll('.grpc-only').forEach(function (el) {
 						// 置空样式会退回 CSS 的 display:none，必须显式给 block
-						el.style.display = sel === 'grpc' ? 'block' : 'none';
+						el.style.display = on ? 'block' : 'none';
 					});
 				}
 
-				// 传输选择（单选）
+				// 传输选择（多选，和协议类型一样点一下切换）
 				document.querySelectorAll('.trans-pill').forEach(function (p) {
 					p.addEventListener('click', function () {
-						document.querySelectorAll('.trans-pill').forEach(function (o) {
-							o.classList.remove('on');
-							o.querySelector('input').checked = false;
-						});
-						p.classList.add('on');
-						p.querySelector('input').checked = true;
+						var cb = p.querySelector('input');
+						cb.checked = !cb.checked;
+						p.classList.toggle('on', cb.checked);
 						syncGrpcFields();
 					});
 				});
@@ -4027,10 +4063,10 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							p.classList.toggle('on', cb.checked);
 						});
 
-						var trans = ['ws', 'xhttp', 'grpc'].indexOf(cfg.transport) >= 0 ? cfg.transport : 'ws';
+						var trans = (Array.isArray(cfg.transports) && cfg.transports.length) ? cfg.transports : ['ws'];
 						document.querySelectorAll('.trans-pill').forEach(function (p) {
 							var cb = p.querySelector('input');
-							cb.checked = (cb.value === trans);
+							cb.checked = trans.indexOf(cb.value) !== -1;
 							p.classList.toggle('on', cb.checked);
 						});
 
@@ -4077,6 +4113,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 					var protocols = [];
 					document.querySelectorAll('.proto-pill[data-proto] input').forEach(function (cb) { if (cb.checked) protocols.push(cb.value); });
 					if (!protocols.length) { showMessage('请至少选择一个协议类型', 'error'); return; }
+					if (!document.querySelector('.trans-pill input:checked')) { showMessage('请至少选择一个传输类型', 'error'); return; }
 					var body = {
 						uuid: uuid,
 						password: document.getElementById('panelPassword').value.trim(),
@@ -4094,7 +4131,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						autoUpdateProxies: document.getElementById('autoUpdateProxies').checked,
 						proxyProtocols: Array.from(document.querySelectorAll('.proxy-protocol:checked')).map(function (cb) { return cb.value; }),
 						protocols: protocols,
-						transport: (document.querySelector('.trans-pill input:checked') || {}).value || 'ws',
+						transports: Array.from(document.querySelectorAll('.trans-pill input:checked')).map(function (cb) { return cb.value; }),
 						grpcMode: (document.querySelector('.grpc-mode-pill input:checked') || {}).value || 'gun',
 						grpcUA: document.getElementById('grpcUA').value.trim(),
 						ech: document.getElementById('echEnabled').checked,
