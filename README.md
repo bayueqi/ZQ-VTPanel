@@ -67,6 +67,8 @@
 | UUID | 节点凭据，也是订阅链接凭据 |
 | 协议类型 | VLESS / Trojan，至少选一个 |
 | 传输类型 | WebSocket / XHTTP / gRPC，默认 WebSocket。XHTTP 需客户端支持（mihomo 1.19.22 起、Xray 系新版）；gRPC 需部署在 Workers（Pages 不支持），并在 Cloudflare 面板开启 gRPC（网络 > gRPC）。Sing-Box 的 XHTTP、Surge / Loon / Quantumult X 的订阅自动按 WebSocket 输出 |
+| gRPC 模式 | `gun` 单流（默认）或 `multi` 多连接复用一条 HTTP/2。`mode` 参数仅 Xray 系客户端读取，mihomo 侧固定单流 |
+| gRPC UA | 覆盖 gRPC 客户端的 User-Agent，可点「获取当前 UA」填入浏览器 UA；留空用客户端自带。Clash 订阅写入 `grpc-opts.grpc-user-agent`，其余格式不含此项 |
 | 订阅转换服务 | subconverter 服务根地址（ZQ-SubApi 即这一层），留空用内置默认；可用环境变量 `SUBCONVERTER_BASE` 指定 |
 | 订阅转换配置文件 | ACL4SSR 规则预设或自填 `.ini` 地址，仅对 Clash 订阅生效；选「不使用」则用服务端默认规则 |
 | ECH | 加密 SNI 绕过 DNS 污染；「高级」里可改 SNI 与 DoH 地址 |

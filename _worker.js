@@ -144,6 +144,8 @@ function configForStore(cfg, overrides = {}) {
         proxyProtocols: (m.proxyProtocols && m.proxyProtocols.length) ? m.proxyProtocols : SUPPORTED_PROXY_PROTOCOLS,
         protocols: (m.protocols && m.protocols.length) ? m.protocols : ["vless", "trojan"],
         transport: TRANSPORTS.includes(m.transport) ? m.transport : "ws",
+        grpcMode: m.grpcMode === "multi" ? "multi" : "gun",
+        grpcUA: typeof m.grpcUA === "string" ? m.grpcUA.trim().slice(0, 256) : "",
         ech: !!m.ech,
         echConfig: {
             sni: (typeof m.echConfig?.sni === "string" ? m.echConfig.sni.trim() : "") || DEFAULT_ECH_SNI,
@@ -167,6 +169,8 @@ const DEFAULT_CONFIG = {
     proxyProtocols: SUPPORTED_PROXY_PROTOCOLS,
     protocols: ["vless", "trojan"],
     transport: "ws",                           // 传输层：ws / xhttp / grpc
+    grpcMode: "gun",                           // gRPC 模式：gun 单流 / multi 多连接复用一条 HTTP/2
+    grpcUA: "",                                // gRPC 客户端 UA，留空用客户端自带
     ech: false, echConfig: { sni: DEFAULT_ECH_SNI, dns: DEFAULT_ECH_DNS },
 };
 
@@ -414,18 +418,26 @@ function clashEchHotPatch(clashYaml, { uuid, echSni, echDns, hosts }) {
 
 // subconverter 能把 VLESS 的 xhttp 原样带出来，但 trojan 会丢掉传输层，
 // 返回前按节点名补齐 network 与对应的 opts（xhttp / grpc）
-function clashTransportHotPatch(clashYaml, { transport, host, pathByLabel }) {
+function clashTransportHotPatch(clashYaml, { transport, host, pathByLabel, grpcUA }) {
     if (!["xhttp", "grpc"].includes(transport) || !pathByLabel || !pathByLabel.size) return clashYaml;
+    const ua = transport === "grpc" && typeof grpcUA === "string" ? grpcUA.trim() : "";
     const optsOf = (path) =>
         transport === "grpc"
-            ? `grpc-opts: {grpc-service-name: ${JSON.stringify(path)}}`
+            ? `grpc-opts: {grpc-service-name: ${JSON.stringify(path)}${ua ? `, grpc-user-agent: ${JSON.stringify(ua)}` : ""}}`
             : `xhttp-opts: {path: ${JSON.stringify(path)}, host: ${JSON.stringify(host)}, mode: stream-one}`;
-    return clashYaml.replace(/^[ \t]*-[ \t]*\{[^\n]*\}[ \t]*$/gm, (line) => {
+    const patched = clashYaml.replace(/^[ \t]*-[ \t]*\{[^\n]*\}[ \t]*$/gm, (line) => {
         const m = line.match(/name:\s*("([^"]*)"|([^,}]+))/);
         if (!m) return line;
         const label = (m[2] !== undefined ? m[2] : m[3] || "").trim();
         const path = pathByLabel.get(label);
         if (!path) return line;
+        // 已经是 grpc 的节点只需要补 UA（subconverter 能带回 network / service-name，但带不出 UA）
+        if (ua && /network:\s*grpc/.test(line)) {
+            if (/grpc-user-agent/.test(line)) return line;
+            if (/grpc-opts:\s*\{/.test(line))
+                return line.replace(/grpc-opts:\s*\{/, `grpc-opts: {grpc-user-agent: ${JSON.stringify(ua)}, `);
+            return line.replace(/\}$/, `, grpc-opts: {grpc-user-agent: ${JSON.stringify(ua)}}}`);
+        }
         if (new RegExp(`network:\\s*${transport}\\b`).test(line)) return line;
         if (/network:\s*\w+/.test(line)) {
             return line
@@ -435,6 +447,8 @@ function clashTransportHotPatch(clashYaml, { transport, host, pathByLabel }) {
         }
         return line.replace(/\}$/, `, network: ${transport}, ${optsOf(path)}}`);
     });
+    // subconverter 会把 Xray 的 mode 参数翻成 grpc-mode，mihomo 没有这个字段，留着只会干扰
+    return transport === "grpc" ? patched.replace(/,?\s*grpc-mode:\s*[A-Za-z0-9_-]+/g, "") : patched;
 }
 
 function singboxEchHotPatch(singboxText, { uuid, echSni }) {
@@ -2582,9 +2596,10 @@ export default {
                 : buildPath(t, d, s, p);
 
         // 传输层参数：ws 走 WebSocket；xhttp 走 stream-one（上下行共用一条 HTTP 流）；grpc 走 gRPC 双向流
-        const transportQuery = (transport) =>
+        // gRPC 的 mode 只对 Xray 系客户端生效（gun 单流 / multi 多连接复用一条 HTTP/2）
+        const transportQuery = (transport, grpcMode = "gun") =>
             transport === "xhttp" ? "type=xhttp&mode=stream-one"
-                : transport === "grpc" ? "type=grpc&mode=gun"
+                : transport === "grpc" ? `type=grpc&mode=${grpcMode === "multi" ? "multi" : "gun"}`
                     : "type=ws";
         // gRPC 的服务名代替 host/path，其余传输仍然是 host + path
         // 服务名不加百分号编码：转换服务对 trojan 的 serviceName 不做解码，编过的会原样带进节点
@@ -2592,10 +2607,10 @@ export default {
             transport === "grpc"
                 ? `serviceName=${rawPathQuery}&authority=${workerHost}`
                 : `host=${workerHost}&path=${encodeURIComponent(rawPathQuery)}`;
-        const buildVlessUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws") =>
-            `vless://${uuid}@${preferredDomain}:${port}?encryption=none&security=tls&sni=${workerHost}&${transportQuery(transport)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}&fp=chrome#${encodeURIComponent(label || preferredDomain)}`;
-        const buildTrojanUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws") =>
-            `trojan://${uuid}@${preferredDomain}:${port}?security=tls&sni=${workerHost}&${transportQuery(transport)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}#${encodeURIComponent(label || preferredDomain)}`;
+        const buildVlessUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws", grpcMode = "gun") =>
+            `vless://${uuid}@${preferredDomain}:${port}?encryption=none&security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}&fp=chrome#${encodeURIComponent(label || preferredDomain)}`;
+        const buildTrojanUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws", grpcMode = "gun") =>
+            `trojan://${uuid}@${preferredDomain}:${port}?security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}#${encodeURIComponent(label || preferredDomain)}`;
 
         // 取 workerHost / 优选IP(domains) / 入口地址(entries)；入口地址为空时用本项目域名
         const getDomains = (request, cfg) => {
@@ -3177,12 +3192,12 @@ export default {
                 if (protocols.includes("vless")) {
                     const name = "V " + n.label;
                     transportPaths.set(name, n.raw);
-                    out.push(buildVlessUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, nodeTransport));
+                    out.push(buildVlessUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, nodeTransport, userConfig.grpcMode));
                 }
                 if (protocols.includes("trojan")) {
                     const name = "T " + n.label;
                     transportPaths.set(name, n.raw);
-                    out.push(buildTrojanUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, nodeTransport));
+                    out.push(buildTrojanUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, nodeTransport, userConfig.grpcMode));
                 }
             }
             const nodesContent = out.join("\n");
@@ -3241,6 +3256,7 @@ export default {
                         transport: nodeTransport,
                         host: lists.workerHost,
                         pathByLabel: transportPaths,
+                        grpcUA: userConfig.grpcUA,
                     });
                     if (userConfig.ech)
                         转换后内容 = clashEchHotPatch(转换后内容, {
@@ -3430,9 +3446,9 @@ export default {
             const echParam = buildEchParam(userConfig);
             for (const n of nodes) {
                 if (protocols.includes("vless"))
-                    allNodeUris.push(buildVlessUri(n.raw, userUUID, "V " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, userConfig.transport));
+                    allNodeUris.push(buildVlessUri(n.raw, userUUID, "V " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, userConfig.transport, userConfig.grpcMode));
                 if (protocols.includes("trojan"))
-                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, "T " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, userConfig.transport));
+                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, "T " + n.label, lists.workerHost, n.addr, n.port || 443, echParam, userConfig.transport, userConfig.grpcMode));
             }
             const allNodesJson = JSON.stringify(allNodeUris);
             const html = `
@@ -3523,6 +3539,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .proto-pill{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border:1px solid var(--border);border-radius:12px;background:#fff;cursor:pointer;user-select:none;font-weight:600;font-size:14px;color:var(--text);transition:border-color .2s,background-color .2s}
 .proto-pill input{display:none}
 .proto-pill.on{border-color:var(--primary);background:#eff6ff;box-shadow:0 0 0 3px rgba(37,99,235,.10)}
+.grpc-only{display:none}
 .help-dot{width:18px;height:18px;padding:0;margin-left:6px;border:1px solid var(--border);border-radius:50%;background:#fff;color:var(--muted);font-size:12px;font-weight:700;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;vertical-align:2px;box-shadow:none}
 .help-dot:hover{border-color:var(--primary);color:var(--primary)}
 .help-body{text-align:left;font-size:14px;color:var(--text);line-height:1.8}
@@ -3626,6 +3643,20 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							<div class="proto-pill trans-pill" data-transport="xhttp"><input type="radio" name="transport" value="xhttp">XHTTP</div>
 							<div class="proto-pill trans-pill" data-transport="grpc"><input type="radio" name="transport" value="grpc">gRPC</div>
 						</div>
+					</div>
+					<div class="form-group grpc-only" id="grpcModeGroup">
+						<label>gRPC 模式</label>
+						<div class="proto-pills">
+							<div class="proto-pill grpc-mode-pill on" data-grpc-mode="gun"><input type="radio" name="grpcMode" value="gun" checked>gun 单流</div>
+							<div class="proto-pill grpc-mode-pill" data-grpc-mode="multi"><input type="radio" name="grpcMode" value="multi">multi 复用</div>
+						</div>
+					</div>
+					<div class="form-group grpc-only" id="grpcUaGroup">
+						<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+							<label for="grpcUA" style="margin:0">gRPC UA</label>
+							<button type="button" id="fillGrpcUA" style="flex:none;min-width:auto;padding:3px 9px;font-size:12px;background:#DAE9FE;color:#2563eb;border-radius:6px;border:none;cursor:pointer">获取当前 UA</button>
+						</div>
+						<input type="text" id="grpcUA" name="grpcUA" placeholder="留空则使用客户端自带 UA">
 					</div>
 					<div class="form-group">
 						<label for="subConvertBase">订阅转换服务</label>
@@ -3866,13 +3897,21 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 				document.getElementById('globalProxyWrap').addEventListener('click', function (e) { e.stopPropagation(); });
 
 				// 协议选择
-				document.querySelectorAll('.proto-pill:not(.trans-pill)').forEach(function (p) {
+				document.querySelectorAll('.proto-pill[data-proto]').forEach(function (p) {
 					p.addEventListener('click', function () {
 						var cb = p.querySelector('input');
 						cb.checked = !cb.checked;
 						p.classList.toggle('on', cb.checked);
 					});
 				});
+
+				// gRPC 专属项只在选中 gRPC 时显示
+				function syncGrpcFields() {
+					var sel = (document.querySelector('.trans-pill input:checked') || {}).value;
+					document.querySelectorAll('.grpc-only').forEach(function (el) {
+						el.style.display = sel === 'grpc' ? '' : 'none';
+					});
+				}
 
 				// 传输选择（单选）
 				document.querySelectorAll('.trans-pill').forEach(function (p) {
@@ -3883,7 +3922,24 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						});
 						p.classList.add('on');
 						p.querySelector('input').checked = true;
+						syncGrpcFields();
 					});
+				});
+
+				// gRPC 模式（单选）
+				document.querySelectorAll('.grpc-mode-pill').forEach(function (p) {
+					p.addEventListener('click', function () {
+						document.querySelectorAll('.grpc-mode-pill').forEach(function (o) {
+							o.classList.remove('on');
+							o.querySelector('input').checked = false;
+						});
+						p.classList.add('on');
+						p.querySelector('input').checked = true;
+					});
+				});
+
+				document.getElementById('fillGrpcUA').addEventListener('click', function () {
+					document.getElementById('grpcUA').value = navigator.userAgent;
 				});
 
 				// 列表渲染
@@ -3971,7 +4027,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						document.querySelectorAll('.proxy-protocol').forEach(function (cb) { cb.checked = selectedProtos.indexOf(cb.value) >= 0; });
 
 						var protos = (Array.isArray(cfg.protocols) && cfg.protocols.length) ? cfg.protocols : ['vless', 'trojan'];
-						document.querySelectorAll('.proto-pill:not(.trans-pill)').forEach(function (p) {
+						document.querySelectorAll('.proto-pill[data-proto]').forEach(function (p) {
 							var cb = p.querySelector('input');
 							cb.checked = protos.indexOf(cb.value) !== -1;
 							p.classList.toggle('on', cb.checked);
@@ -3983,6 +4039,15 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							cb.checked = (cb.value === trans);
 							p.classList.toggle('on', cb.checked);
 						});
+
+						var gm = cfg.grpcMode === 'multi' ? 'multi' : 'gun';
+						document.querySelectorAll('.grpc-mode-pill').forEach(function (p) {
+							var cb = p.querySelector('input');
+							cb.checked = (cb.value === gm);
+							p.classList.toggle('on', cb.checked);
+						});
+						document.getElementById('grpcUA').value = cfg.grpcUA || '';
+						syncGrpcFields();
 
 						state.domains = (cfg.domains || []).map(function (x) { return typeof x === 'string' ? { first: x, second: '' } : { first: x.ip || '', second: x.remark || '' }; });
 						state.proxyIps = (cfg.proxyIps || []).map(function (x) { return String(x || ''); });
@@ -4016,7 +4081,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						subConfig = '${SUB_CONFIG_BASE}' + subConfig;
 					}
 					var protocols = [];
-					document.querySelectorAll('.proto-pill:not(.trans-pill) input').forEach(function (cb) { if (cb.checked) protocols.push(cb.value); });
+					document.querySelectorAll('.proto-pill[data-proto] input').forEach(function (cb) { if (cb.checked) protocols.push(cb.value); });
 					if (!protocols.length) { showMessage('请至少选择一个协议类型', 'error'); return; }
 					var body = {
 						uuid: uuid,
@@ -4036,6 +4101,8 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						proxyProtocols: Array.from(document.querySelectorAll('.proxy-protocol:checked')).map(function (cb) { return cb.value; }),
 						protocols: protocols,
 						transport: (document.querySelector('.trans-pill input:checked') || {}).value || 'ws',
+						grpcMode: (document.querySelector('.grpc-mode-pill input:checked') || {}).value || 'gun',
+						grpcUA: document.getElementById('grpcUA').value.trim(),
 						ech: document.getElementById('echEnabled').checked,
 						echConfig: { sni: document.getElementById('echSni').value.trim(), dns: document.getElementById('echDns').value.trim() }
 					};
