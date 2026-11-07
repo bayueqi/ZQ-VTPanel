@@ -2,7 +2,7 @@
 
 ![界面](src/界面.png)
 
-一个跑在 Cloudflare Workers 上的 VLESS / Trojan 节点面板，一份代码同时是节点隧道、订阅分发器和 Web 管理后台。
+一个跑在 Cloudflare Workers 上的 VLESS / Trojan 节点面板。`_worker.js` 是核心（隧道、订阅分发、接口），`docs/` 是管理界面（静态页，由核心反代），两部分独立部署、互不影响。
 
 ## 功能
 
@@ -17,7 +17,17 @@
 
 ## 部署步骤
 
-### 1. 部署到 Workers
+### 1. 发布面板页面
+
+面板是 `docs/` 下的两个静态文件（`index.html`、`login.html`），任意静态托管均可，以下用 GitHub Pages：
+
+1. 仓库 **Settings** → **Pages**
+2. **Source** 选择 **Deploy from a branch**，分支 `main`，目录 `/docs`，保存
+3. 等待发布完成，得到地址 `https://<用户名>.github.io/ZQ-JKPanel`
+
+`_worker.js` 里的默认地址是 `https://bayueqi.github.io/ZQ-JKPanel`。用户名或仓库名不同，部署 Worker 时用环境变量 `PANEL_URL` 指定你的地址。
+
+### 2. 部署核心 Worker
 
 1. 登录 Cloudflare 控制台
 2. 左侧进入 **Workers 和 Pages**
@@ -36,20 +46,12 @@
    - 变量名称：`JKPanel`
    - 选择刚创建的 KV 命名空间
    - 点击 **保存**
-9. 绑定自定义域名（注意：不能使用 workers 默认域名）
+9. 面板地址（可选，非默认地址时必填）：
+   - 同一个页面 → **变量和机密** → **添加** → 类型选 **文本**
+   - 变量名称：`PANEL_URL`，值为第 1 步拿到的 Pages 地址
+10. 绑定自定义域名（注意：不能使用 workers 默认域名）
 
-### 2. 部署到 Pages
-
-1. [下载 ZIP](https://github.com/bayueqi/ZQ-JKPanel/archive/refs/heads/main.zip)
-2. 登录 Cloudflare → **Workers 和 Pages** → **创建应用程序** → 选择 **创建 Pages**
-3. 选择 **直接上传**，上传下载的 ZIP 包，直接保存并部署
-4. 创建 KV 命名空间：
-   - 左侧进入 **存储和数据库**，点击 **KV**
-   - 点击 **创建命名空间**，名称建议：`JKPanel`
-5. 绑定 KV：进入 Pages 项目 → **设置** → **变量** → **KV 命名空间绑定** → **添加绑定**
-   - 变量名称：`JKPanel`
-   - 选择已创建的 KV 命名空间
-6. 再次上传 ZIP 包并部署，接着访问域名（可以绑定自定义域名，也可使用 pages 默认域名）
+面板只能通过 Worker 域名访问。页面里的接口请求走同域相对路径，直接打开 Pages 地址取不到数据。
 
 ## 使用
 
