@@ -2,7 +2,7 @@
 
 ![界面](src/界面.png)
 
-一个跑在 Cloudflare Workers 上的 VLESS / Trojan 节点面板。`_worker.js` 是核心（隧道、订阅分发、接口），`docs/` 是管理界面（静态页，由核心反代），两部分独立部署、互不影响。`jkpanel.js` 是面板的整份代码（界面与配置接口），可单独部署成一个 Worker 充当管理界面。
+一个跑在 Cloudflare Workers 上的 VLESS / Trojan 节点面板。`_worker.js` 是核心（隧道、订阅分发、接口），`docs/` 是管理界面（静态页，由核心反代），两部分独立部署、互不影响。`jkpanel.js` 是整份代码，可单独部署成一个 Worker 独立运行。
 
 ## 功能
 
@@ -19,17 +19,11 @@
 
 ### 1. 发布面板页面
 
-面板有两种部署方式，任选一种。
-
-**方式一：静态页 `docs/`**，任意静态托管均可，以下用 GitHub Pages：
+面板是 `docs/` 下的两个静态文件（`index.html`、`login.html`），任意静态托管均可，以下用 GitHub Pages：
 
 1. 仓库 **Settings** → **Pages**
 2. **Source** 选择 **Deploy from a branch**，分支 `main`，目录 `/docs`，保存
 3. 等待发布完成，得到访问地址
-
-**方式二：独立 Worker `jkpanel.js`**
-
-`jkpanel.js` 是面板的整份代码，含界面与配置接口。新建一个 Worker，粘贴 `jkpanel.js` 全部内容，绑定与核心相同的 KV（变量名 `JKPanel`），部署后绑定自定义域名，该域名即面板地址。
 
 `_worker.js` 的默认面板地址是 `https://jkpanel.vpnjk.cc.cd`。面板地址与此不同时，部署核心 Worker 时用环境变量 `PANEL_URL` 指定。
 
