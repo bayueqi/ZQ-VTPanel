@@ -86,7 +86,6 @@ const paths=["/static/js","/assets/img","/api/2024","/cdn/file","/upload/data","
 const paramsMap={t:["m","type","mode"],d:["dir","direct","d"],s:["socks","proxy","s"],p:["ip","proxyip","p"],v:["r","rand","v","id","t"]};
 const getPath=()=>paths[Math.floor(Math.random()*paths.length)];
 const getParam=(key)=>paramsMap[key][Math.floor(Math.random()*paramsMap[key].length)];
-const isTunnelPath=(p)=>paths.some((base)=>p===base||p.startsWith(base+"/"));
 
 // xhttp 混淆：标识头/键由 UUID 派生。客户端把查询串塞进这个请求头，服务端据此认出 xhttp，
 // 顺带挡掉直接照抄路径的扫描器（真客户端的 padding 串长度固定在百位级）
@@ -3091,11 +3090,12 @@ export default {
 
         const url = normalizeQueryPath(new URL(req.url));
 
-        // XHTTP 与 gRPC 的请求都落在伪装路径下，靠两点区分：
-        // 1) 开了 extra 的 xhttp 客户端会把查询串整段搬进标识头，gRPC 不会；
-        // 2) gRPC 的 :path 固定是 <服务名>/Tun（multi 为 /TunMulti）。
-        // 老订阅的 xhttp 路径就是伪装路径本身、没有子段，也会落到这里。
-        if (req.method === "POST" && req.body && isTunnelPath(url.pathname)) {
+        // 代理流量不限定路径：客户端会把服务名、session 段按自己的方式拼进路径，各版本拼法不同，
+        // 死盯伪装路径只会让一部分连接 404（表现就是测速 -1、gRPC 直接连不上）。
+        // 只把面板自己的接口和首页登录排除掉。
+        const panelApi = url.pathname === "/api/config" || url.pathname === "/api/fetch-best-ip" || url.pathname === "/api/fetch-proxies";
+        if (req.method === "POST" && req.body && !panelApi &&
+            url.pathname !== "/" && url.pathname !== "/index.html") {
             const userConfig = await getUserConfig(env);
             const [tagHead, tagKey] = xhttpTag(userConfig.uuid);
             const padding = xhttpPadding(req, tagHead, tagKey);
@@ -3103,7 +3103,9 @@ export default {
             if (padding && (padding.length < 64 || padding.length > 4096)) {
                 return new Response("bad request", { status: 400 });
             }
-            const isGrpcReq = !padding && /\/tun(multi)?$/i.test(url.pathname);
+            // 带 padding 的是 xhttp；剩下按 gRPC 处理，外壳不对时 handleTunnel 会自己换回来
+            const isGrpcReq = !padding &&
+                (req.headers.get("content-type") || "").toLowerCase().startsWith("application/grpc");
             return await handleTunnel(
                 req,
                 userConfig,
