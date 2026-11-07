@@ -2501,23 +2501,23 @@ function grpcSlicer() {
     };
 }
 
-// gRPC 没有查询串，模式写在服务名最后一段：…/d、…/p-<base64url>、…/s-<base64url>
-// 客户端实际请求的是 <服务名>/Tun（multi 模式为 /TunMulti），所以要先去掉这个方法名
+// 隧道传输的回退方式写在路径最后一段：d、p-<base64url>、s-<base64url>，
+// 前面加 d 表示先直连、失败再回退（dp- / ds-）
+// gRPC 客户端实际请求的是 <服务名>/Tun（multi 模式为 /TunMulti），所以要先去掉这个方法名
 function grpcRoute(u) {
     const segs = u.pathname.split("/").filter(Boolean);
     if (/^tun(multi)?$/i.test(segs[segs.length - 1] || "")) segs.pop();
     for (let i = segs.length - 1; i >= 0; i--) {
         const seg = segs[i];
         if (seg === "d") return { getOrder: () => ["direct"] };
-        if (seg.length > 2 && seg[1] === "-") {
-            const val = b64urlDec(seg.slice(2));
-            if (!val) continue;
-            if (seg[0] === "p") return { PROXY_IP: val, getOrder: () => ["proxy", "direct"] };
-            if (seg[0] === "s") {
-                const cfg = parseProxyAddress(val);
-                if (cfg) return { proxyConfig: cfg, getOrder: () => ["s5"] };
-            }
-        }
+        const m = /^(d?)([ps])-(.+)$/.exec(seg);
+        if (!m) continue;
+        const val = b64urlDec(m[3]);
+        if (!val) continue;
+        const first = m[1] === "d";
+        if (m[2] === "p") return { PROXY_IP: val, getOrder: () => (first ? ["direct", "proxy"] : ["proxy", "direct"]) };
+        const cfg = parseProxyAddress(val);
+        if (cfg) return { proxyConfig: cfg, getOrder: () => (first ? ["direct", "s5"] : ["s5"]) };
     }
     return null;
 }
@@ -2643,12 +2643,18 @@ export default {
 
         // 隧道传输（xhttp / gRPC）把回退方式写进路径段：/d、/p-<base64url>、/s-<base64url>
         // xhttp 开了混淆后查询串会被客户端整段搬进请求头，模式放 query 服务端就取不到了
-        const routeSeg = (p, s) => (p ? "p-" + b64urlEnc(p) : s ? "s-" + b64urlEnc(s) : "d");
+        // 隧道传输（xhttp / gRPC）把回退方式写进路径段：
+        // d = 只直连，p-/s- = 只走 ProxyIP / 其它代理，dp-/ds- = 先直连，失败再回退
+        const routeSeg = (t, p, s) => {
+            const tail = p ? "p-" + b64urlEnc(p) : s ? "s-" + b64urlEnc(s) : "";
+            if (!tail) return "d";
+            return t === "dp" || t === "ds" ? "d" + tail : tail;
+        };
         const buildPathFor = (transport, t, d, s, p) =>
             transport === "grpc"
-                ? `${getPath()}/${routeSeg(p, s)}`
+                ? `${getPath()}/${routeSeg(t, p, s)}`
                 : transport === "xhttp"
-                    ? `${getPath()}/${routeSeg(p, s)}?${getParam("v")}=${randStr()}`
+                    ? `${getPath()}/${routeSeg(t, p, s)}?${getParam("v")}=${randStr()}`
                     : buildPath(t, d, s, p);
 
         // 传输层参数：ws 走 WebSocket；xhttp 走 stream-one（上下行共用一条 HTTP 流）；grpc 走 gRPC 双向流
@@ -2690,9 +2696,10 @@ export default {
                 const a = splitHostPort(d.ip);
                 const host = nodeHost(a.host);
                 if (proxyIps.length) {
-                    // 填了 ProxyIP：只出「优选IP × ProxyIP」回退节点，不再单独出优选IP直连节点
+                    // 填了 ProxyIP：只出「优选IP × ProxyIP」节点，不再单独出优选IP直连节点
+                    // 全局 = 只走 ProxyIP；非全局 = 先直连，失败再回退 ProxyIP
                     for (const p of proxyIps)
-                        nodes.push({ label: d.remark || d.ip, params: ["p", 1, null, p], addr: host, port: a.port });
+                        nodes.push({ label: d.remark || d.ip, params: [cfg.globalProxy ? "p" : "dp", cfg.globalProxy ? 0 : 1, null, p], addr: host, port: a.port });
                 } else {
                     nodes.push({ label: d.remark || d.ip, params: ["d", 1, null, null], addr: host, port: a.port });
                 }
@@ -2702,9 +2709,10 @@ export default {
                 const host = nodeHost(a.host);
                 for (const pr of proxies) {
                     const name = pr.remark || proxyTypeLabel(pr.proxy);
+                    // 全局 = 只走其它代理；非全局 = 先直连，失败再回退到它
                     nodes.push(cfg.globalProxy
                         ? { label: name, params: ["s", null, pr.proxy, null], addr: host, port: a.port }
-                        : { label: name, params: ["p", 1, pr.proxy, null], addr: host, port: a.port });
+                        : { label: name, params: ["ds", 1, pr.proxy, null], addr: host, port: a.port });
                 }
             }
             return nodes;
