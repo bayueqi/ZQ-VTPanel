@@ -3635,11 +3635,11 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						</div>
 					</div>
 					<div class="form-group grpc-only" id="grpcUaGroup">
-						<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-							<label for="grpcUA" style="margin:0">gRPC UA</label>
-							<button type="button" id="fillGrpcUA" style="flex:none;min-width:auto;padding:3px 9px;font-size:12px;background:#DAE9FE;color:#2563eb;border-radius:6px;border:none;cursor:pointer">获取当前 UA</button>
+						<label for="grpcUA">gRPC UA</label>
+						<div style="display:flex;align-items:center;gap:8px">
+							<input type="text" id="grpcUA" name="grpcUA" placeholder="留空则使用客户端自带 UA" style="flex:1;min-width:0">
+							<button type="button" id="fillGrpcUA" style="flex:none;min-width:auto;padding:8px 12px;font-size:12px;background:#DAE9FE;color:#2563eb;border-radius:8px;border:none;cursor:pointer;white-space:nowrap">获取当前 UA</button>
 						</div>
-						<input type="text" id="grpcUA" name="grpcUA" placeholder="留空则使用客户端自带 UA">
 					</div>
 					<div class="form-group">
 						<label for="subConvertBase">订阅转换服务</label>
