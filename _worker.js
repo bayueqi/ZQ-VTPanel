@@ -3526,8 +3526,15 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .help-dot{width:18px;height:18px;padding:0;margin-left:6px;border:1px solid var(--border);border-radius:50%;background:#fff;color:var(--muted);font-size:12px;font-weight:700;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;vertical-align:2px;box-shadow:none}
 .help-dot:hover{border-color:var(--primary);color:var(--primary)}
 .help-body{text-align:left;font-size:14px;color:var(--text);line-height:1.8}
-.help-body p{margin:0 0 8px}
-.help-body p:last-child{margin-bottom:0}
+.help-body p{margin:0 0 10px}
+.help-key{font-weight:700;margin-right:4px}
+.help-key::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:2px;background:currentColor}
+.k-ws{color:#0891b2}
+.k-xhttp{color:#c2410c}
+.k-grpc{color:#7c3aed}
+.help-sub{color:var(--muted);font-size:13px;padding-left:16px;margin-bottom:6px !important}
+.help-link{display:inline-block;margin-top:2px;color:var(--primary);font-weight:600;text-decoration:none;border-bottom:1px solid rgba(37,99,235,.35);line-height:1.4}
+.help-link:hover{color:var(--primary-dark);border-bottom-color:var(--primary-dark)}
 .qr-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(30,58,95,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:1000;align-items:center;justify-content:center;padding:20px}
 .qr-modal.active{display:flex}
 .qr-content{background:var(--glass-strong);border-radius:24px;padding:32px;text-align:center;max-width:400px;width:100%;box-shadow:var(--shadow-lg);border:1px solid var(--line);position:relative;backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);animation:rise .35s ease}
@@ -3758,9 +3765,11 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 			<div class="qr-content">
 				<div class="qr-title">传输类型说明</div>
 				<div class="help-body">
-					<p>WebSocket：无需额外设置，所有客户端都支持。</p>
-					<p>XHTTP：需客户端支持，mihomo 1.19.22 起、Xray 系新版可用。</p>
-					<p>gRPC：需客户端支持，并要求项目部署在 Workers、在 Cloudflare 面板为当前域名开启 gRPC（网络 &gt; gRPC）。</p>
+					<p><span class="help-key k-ws">WebSocket</span>无需额外设置，所有客户端都支持。</p>
+					<p><span class="help-key k-xhttp">XHTTP</span>需客户端支持，mihomo 1.19.22 起、Xray 系新版可用。</p>
+					<p><span class="help-key k-grpc">gRPC</span>需客户端支持，mihomo、Xray、v2rayN 均可，另需满足两点：</p>
+					<p class="help-sub">1. 部署在 Workers，不是 Pages。</p>
+					<p class="help-sub">2. 在 Cloudflare 面板为当前域名开启 gRPC，<a class="help-link" href="https://dash.cloudflare.com/?to=/:account/:zone/network" target="_blank" rel="noopener">前往网络设置</a>。</p>
 				</div>
 				<button class="qr-close" id="closeTransportBtn">我知道了</button>
 			</div>
