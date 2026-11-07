@@ -190,31 +190,51 @@ function parseProxyApiList(text, protocols) {
     return out;
 }
 
-// 解析优选IP订阅文本：支持 ip / ip:端口 / [ipv6]:端口，可带 #备注（备注可含空格，如 1.2.3.4:443#CF IP-中国香港-63ms）
+// 解析优选IP订阅文本：支持 ip / 域名 / [ipv6]，均可带端口与 #备注
+// 例：1.2.3.4:8443#香港、store.ubi.com:443#企业域名、2400:3200::1
 const IPV4_RE = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
 const IPV6_RE = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9])?[0-9]))$/;
-const IPV4_PORT_RE = /^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/;
+// 单个条目：[IPv6] / IPv4 / 域名 / 裸 IPv6，可带 :端口
+const BEST_HOST_RE = /^(?:\[[0-9a-fA-F:]+\]|\d{1,3}(?:\.\d{1,3}){3}|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|[0-9a-fA-F]*:[0-9a-fA-F:]*)(?::\d{1,5})?$/;
+
+// 拆分 host:port，未带端口按 443；裸 IPv6 不会被误当成端口
+function splitHostPort(addr) {
+    const s = String(addr || "").trim();
+    if (s.startsWith("[")) {
+        const m = s.match(/^(\[[^\]]+\])(?::(\d{1,5}))?$/);
+        if (m) return { host: m[1], port: m[2] ? Number(m[2]) : 443 };
+    }
+    const i = s.lastIndexOf(":");
+    if (i > 0 && s.indexOf(":") === i && /^\d{1,5}$/.test(s.slice(i + 1))) return { host: s.slice(0, i), port: Number(s.slice(i + 1)) };
+    return { host: s, port: 443 };
+}
+
+// 条目是 IP 还是域名，用于区分「优选IP」「优选域名」
+function isIpHost(addr) {
+    const host = splitHostPort(addr).host.replace(/^\[|\]$/g, "");
+    return IPV4_RE.test(host) || IPV6_RE.test(host);
+}
+
 function parseBestIpList(text) {
     const seen = new Set(), out = [];
     const addOne = (raw) => {
         raw = String(raw || "").trim();
         if (!raw) return;
         const hashIdx = raw.indexOf("#");
-        let ip = (hashIdx === -1 ? raw : raw.slice(0, hashIdx)).trim();
+        const ip = (hashIdx === -1 ? raw : raw.slice(0, hashIdx)).trim();
         const remark = (hashIdx === -1 ? "" : raw.slice(hashIdx + 1)).trim();
-        const b = ip.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
-        if (b) ip = b[1];
-        else ip = ip.replace(IPV4_PORT_RE, "$1");
-        if ((!IPV4_RE.test(ip) && !IPV6_RE.test(ip)) || seen.has(ip)) return;
+        if (!BEST_HOST_RE.test(ip) || seen.has(ip)) return;
+        const port = splitHostPort(ip).port;
+        if (!(port > 0 && port <= 65535)) return;
         seen.add(ip);
         out.push({ ip, remark });
     };
     for (const line of String(text || "").split(/\r?\n/)) {
         const l = line.trim();
-        if (!l) continue;
-        // 整行形如 ip[:端口][#备注]：备注允许含空格，整行当一个条目
-        if (/^(?:[0-9a-fA-F:.]+|\[[0-9a-fA-F:.]+\])(?::\d{1,5})?(?:#.*)?$/.test(l)) { addOne(l); continue; }
-        // 同一行多个 IP：按空白/逗号切分
+        if (!l || l.startsWith("//") || l.startsWith(";")) continue;
+        // 整行形如 host[:端口][#备注]：备注允许含空格，整行当一个条目
+        if (BEST_HOST_RE.test(l.split("#")[0].trim())) { addOne(l); continue; }
+        // 同一行多个条目：按空白/逗号切分
         for (const token of l.split(/[\s,]+/)) addOne(token);
     }
     return out;
@@ -2200,26 +2220,32 @@ export default {
             return { workerHost, domains, entries };
         };
 
-        // 生成全部节点（label/raw/addr 三元组）。raw 里的 d/s/p 参数决定隧道回退顺序。
+        // 生成全部节点（label/raw/addr/port）。raw 里的 d/s/p 参数决定隧道回退顺序。
+        // 裸 IPv6 补上方括号，否则拼出来的 URI 不合法
+        const nodeHost = (h) => (h.includes(":") && !h.startsWith("[") ? `[${h}]` : h);
         const buildNodes = (cfg, lists) => {
             const nodes = [];
             const proxies = cfg.proxies || [];
             const proxyIps = cfg.proxyIps || [];
             for (const d of lists.domains) {
+                const a = splitHostPort(d.ip);
+                const host = nodeHost(a.host);
                 if (proxyIps.length) {
                     // 填了 ProxyIP：只出「优选IP × ProxyIP」回退节点，不再单独出优选IP直连节点
                     for (const p of proxyIps)
-                        nodes.push({ label: d.remark || d.ip, raw: buildPath("p", 1, null, p), addr: d.ip });
+                        nodes.push({ label: d.remark || d.ip, raw: buildPath("p", 1, null, p), addr: host, port: a.port });
                 } else {
-                    nodes.push({ label: d.remark || d.ip, raw: buildPath("d", 1, null, null), addr: d.ip });
+                    nodes.push({ label: d.remark || d.ip, raw: buildPath("d", 1, null, null), addr: host, port: a.port });
                 }
             }
             for (const e of lists.entries) {
+                const a = splitHostPort(e);
+                const host = nodeHost(a.host);
                 for (const pr of proxies) {
                     const name = pr.remark || proxyTypeLabel(pr.proxy);
                     nodes.push(cfg.globalProxy
-                        ? { label: name, raw: buildPath("s", null, pr.proxy, null), addr: e }
-                        : { label: name, raw: buildPath("p", 1, pr.proxy, null), addr: e });
+                        ? { label: name, raw: buildPath("s", null, pr.proxy, null), addr: host, port: a.port }
+                        : { label: name, raw: buildPath("p", 1, pr.proxy, null), addr: host, port: a.port });
                 }
             }
             return nodes;
@@ -2635,7 +2661,7 @@ export default {
             try {
                 const text = await fetchTextWithTimeout(apiUrl, "text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS);
                 const ips = parseBestIpList(text);
-                if (!ips.length) return json({ success: false, error: "未获取到优选IP" });
+                if (!ips.length) return json({ success: false, error: "未获取到优选IP/域名" });
                 // 与订阅自动拉取同一套合并逻辑：整批替换「优选」条目，保留手动填写的条目
                 const domains = mergeBestIps(currentDomains, ips);
                 const added = domains.filter((d) => (d.remark || "").startsWith("优选")).length;
@@ -2769,18 +2795,18 @@ export default {
                 : ["vless", "trojan"];
             const echParam = buildEchParam(userConfig);
             // 收集所有节点使用的域名（排除纯 IP），用于 ECH nameserver-policy 走 DoH 解析
-            const isIP = (s) => /^(\d{1,3}\.){3}\d{1,3}$/.test(s) || /^[0-9a-fA-F:]+$/.test(s);
             const echHosts = [...new Set(
                 [lists.workerHost, ...lists.domains.map((d) => d.ip), ...lists.entries]
-                    .filter((h) => h && !isIP(h)),
+                    .map((s) => splitHostPort(s || "").host.replace(/^\[|\]$/g, ""))
+                    .filter((h) => h && !isIpHost(h)),
             )];
             const echSni = userConfig.echConfig?.sni || "";
             const echDns = userConfig.echConfig?.dns || "";
             for (const n of nodes) {
                 if (protocols.includes("vless"))
-                    out.push(buildVlessUri(n.raw, userConfig.uuid, "V " + n.label, lists.workerHost, n.addr, 443, echParam));
+                    out.push(buildVlessUri(n.raw, userConfig.uuid, "V " + n.label, lists.workerHost, n.addr, n.port || 443, echParam));
                 if (protocols.includes("trojan"))
-                    out.push(buildTrojanUri(n.raw, userConfig.uuid, "T " + n.label, lists.workerHost, n.addr, 443, echParam));
+                    out.push(buildTrojanUri(n.raw, userConfig.uuid, "T " + n.label, lists.workerHost, n.addr, n.port || 443, echParam));
             }
             const nodesContent = out.join("\n");
             const responseHeaders = {
@@ -3025,9 +3051,9 @@ export default {
             const echParam = buildEchParam(userConfig);
             for (const n of nodes) {
                 if (protocols.includes("vless"))
-                    allNodeUris.push(buildVlessUri(n.raw, userUUID, "V " + n.label, lists.workerHost, n.addr, 443, echParam));
+                    allNodeUris.push(buildVlessUri(n.raw, userUUID, "V " + n.label, lists.workerHost, n.addr, n.port || 443, echParam));
                 if (protocols.includes("trojan"))
-                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, "T " + n.label, lists.workerHost, n.addr, 443, echParam));
+                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, "T " + n.label, lists.workerHost, n.addr, n.port || 443, echParam));
             }
             const allNodesJson = JSON.stringify(allNodeUris);
             const html = `
@@ -3075,6 +3101,10 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .list{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
 .list-item{display:flex;gap:8px;align-items:center}
 .list-item input{flex:1 1 0%;min-width:0}
+#domains,#proxies{max-height:400px;overflow-y:auto;padding-right:6px;scrollbar-width:thin}
+#domains::-webkit-scrollbar,#proxies::-webkit-scrollbar{width:6px}
+#domains::-webkit-scrollbar-thumb,#proxies::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
+#domains::-webkit-scrollbar-thumb:hover,#proxies::-webkit-scrollbar-thumb:hover{background:#94a3b8}
 .link-arrow{color:var(--primary);text-decoration:none;font-size:14px;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:8px;background:var(--glass-strong);transition:background-color .2s,color .2s;margin-left:8px;flex:none}
 .link-arrow:hover{background:var(--primary);color:#fff}
 .label-with-link{display:flex;align-items:center}
@@ -3237,25 +3267,25 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 				<button type="button" class="collapse-header" data-collapse="node-content"><span class="ch-title"><span class="ch-dot" style="background:#7c3aed"></span>节点配置</span><span class="icon">▼</span></button>
 				<div class="collapse-content" id="node-content"><div class="cc-inner">
 					<div class="sub-block">
-						<div class="collapse-header sub-head" data-collapse="node-entry"><span class="sub-title"><span class="ch-dot" style="background:#0ea5e9"></span>优选IP 与 ProxyIP</span><span class="sub-right"><span class="icon">▼</span></span></div>
+						<div class="collapse-header sub-head" data-collapse="node-entry"><span class="sub-title"><span class="ch-dot" style="background:#0ea5e9"></span>优选IP/域名与ProxyIP</span><span class="sub-right"><span class="icon">▼</span></span></div>
 						<div class="collapse-content" id="node-entry"><div class="cc-inner">
 							<div class="form-group">
 								<div class="label-with-link">
-									<label style="margin:0">优选IP</label>
-									<a href="https://ipdb.030101.xyz/bestcfv4/" target="_blank" rel="nofollow noopener" class="link-arrow" title="优选IP地址"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M3.5 9.5L9.5 3.5M9.5 3.5H5M9.5 3.5V8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+									<label style="margin:0">优选IP/域名</label>
+									<a href="https://ipdb.030101.xyz/bestcfv4/" target="_blank" rel="nofollow noopener" class="link-arrow" title="优选IP/域名地址"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M3.5 9.5L9.5 3.5M9.5 3.5H5M9.5 3.5V8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
 									<button type="button" id="toggleBestIpSettings" style="margin-left:8px;padding:6px 12px;min-width:auto;flex:none;background:#DAE9FE;color:#2563eb;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer">自动优选</button>
 								</div>
 								<div id="bestIpSettings" style="display:none;margin:12px 0;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #bfdbfe">
 									<div style="margin-bottom:8px">
-										<label style="font-size:13px;font-weight:600;color:#64748b">优选IP API地址</label>
+										<label style="font-size:13px;font-weight:600;color:#64748b">优选IP/域名 API地址</label>
 										<input type="text" id="bestIpApi" placeholder="${DEFAULT_BEST_IP_API}" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid #bfdbfe;border-radius:6px;font-size:13px">
 									</div>
-									<label style="display:flex;align-items:center;font-size:13px;font-weight:600;color:#64748b;margin-bottom:8px"><input type="checkbox" id="autoUpdateBestIp" style="margin-right:8px">自动获取优选IP</label>
-									<button type="button" id="fetchBestIp" class="btn btn-success" style="width:100%;min-width:auto;padding:10px 16px;font-size:13px">获取优选IP</button>
+									<label style="display:flex;align-items:center;font-size:13px;font-weight:600;color:#64748b;margin-bottom:8px"><input type="checkbox" id="autoUpdateBestIp" style="margin-right:8px">自动获取优选IP/域名</label>
+									<button type="button" id="fetchBestIp" class="btn btn-success" style="width:100%;min-width:auto;padding:10px 16px;font-size:13px">获取优选IP/域名</button>
 								</div>
 								<div id="domains" class="list"></div>
 								<div class="input-group">
-									<input type="text" id="domainNew" placeholder="输入IP">
+									<input type="text" id="domainNew" placeholder="输入IP或域名">
 									<input type="text" id="domainRemarkNew" placeholder="输入备注">
 									<button type="button" id="addDomain" class="btn btn-secondary chip">添加</button>
 								</div>
@@ -3274,7 +3304,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						</div></div>
 					</div>
 					<div class="sub-block">
-						<div class="collapse-header sub-head" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局代理</label><span class="icon">▼</span></span></div>
+						<div class="collapse-header sub-head" data-collapse="node-exit"><span class="sub-title"><span class="ch-dot" style="background:#f59e0b"></span>入口地址与其它代理</span><span class="sub-right"><label class="gt-switch" id="globalProxyWrap"><input type="checkbox" id="globalProxy"><span class="gt-slider"></span>全局</label><span class="icon">▼</span></span></div>
 						<div class="collapse-content" id="node-exit"><div class="cc-inner">
 							<div class="form-group">
 								<label>入口地址</label>
@@ -3667,9 +3697,9 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							if (result.success && result.domains) {
 								state.domains = result.domains.map(function (d) { return { first: d.ip || '', second: d.remark || '' }; });
 								renderPairList(document.getElementById('domains'), state.domains, 'IP地址', '输入备注');
-								showMessage('成功更新 ' + result.added + ' 个优选IP', 'success');
-							} else { showMessage(result.error || '未获取到优选IP', 'error'); }
-						} catch (e) { showMessage('获取优选IP失败: ' + e.message, 'error'); }
+								showMessage('成功更新 ' + result.added + ' 个优选IP/域名', 'success');
+							} else { showMessage(result.error || '未获取到优选IP/域名', 'error'); }
+						} catch (e) { showMessage('获取优选IP/域名失败: ' + e.message, 'error'); }
 						finally { btn.textContent = old; btn.disabled = false; }
 					});
 
@@ -3729,34 +3759,43 @@ async function fetchTextWithTimeout(url, accept, ms) {
 
 // 备注以「优选」开头的是上一次拉取的批次，本次整批替换；不带该字样的视为手动填写，保留
 const isPreferredItem = (item) => (item.remark || "").startsWith("优选");
+const BEST_IP_LIMIT = 100;
 
-function mergeBestIps(domains, ips) {
-    const manual = normalizeDomains(domains).filter((d) => !isPreferredItem(d));
-    const existing = new Set(manual.map((d) => d.ip));
-    const merged = [...manual, ...ips.filter((i) => !existing.has(i.ip)).map((i) => ({ ip: i.ip, remark: "优选IP" }))];
-    return merged.length > 20 ? merged.slice(0, 20) : merged;
+// 手动条目原样保留，自动拉取的整批替换；超过上限只截自动部分，不动手动条目
+function mergePreferred(current, fresh, keyOf, makeItem, limit) {
+    const manual = current.filter((it) => !isPreferredItem(it));
+    const existing = new Set(manual.map(keyOf));
+    const auto = [];
+    for (const it of fresh) {
+        const key = keyOf(it);
+        if (!key || existing.has(key)) continue;
+        existing.add(key);
+        auto.push(makeItem(it));
+    }
+    if (limit && manual.length + auto.length > limit) return [...manual, ...auto.slice(0, Math.max(0, limit - manual.length))];
+    return [...manual, ...auto];
 }
 
-function mergeProxies(proxies, fresh) {
-    const manual = (proxies || []).filter((p) => !isPreferredItem(p));
-    const existing = new Set(manual.map((p) => p.proxy));
-    return [...manual, ...fresh.filter((p) => !existing.has(p.proxy)).map((p) => ({ proxy: p.proxy, remark: "优选" + p.remark }))];
-}
+const mergeBestIps = (domains, ips) =>
+    mergePreferred(normalizeDomains(domains), ips, (d) => d.ip, (i) => ({ ip: i.ip, remark: isIpHost(i.ip) ? "优选IP" : "优选域名" }), BEST_IP_LIMIT);
+
+const mergeProxies = (proxies, fresh) =>
+    mergePreferred(proxies || [], fresh, (p) => p.proxy, (p) => ({ proxy: p.proxy, remark: "优选" + p.remark }), 0);
+
+// 未勾选或没填地址时返回 null，不发请求；拉取失败返回空数组，不拖累另一个源
+const pullList = (enabled, url, accept, parse) =>
+    enabled && url
+        ? fetchTextWithTimeout(url, accept, AUTO_FETCH_TIMEOUT_MS)
+            .then(parse)
+            .catch((e) => { console.error("Auto update failed:", url, e); return []; })
+        : null;
 
 // 拉取优选IP与其它代理并回写配置，返回合并后的配置；没有新内容返回 null
 async function runAutoUpdate(env, cfg) {
     // 两个源并发拉，串行会把 5+5 秒叠到总超时之外
     const [ips, fresh] = await Promise.all([
-        cfg.autoUpdateBestIp && cfg.bestIpApi
-            ? fetchTextWithTimeout(cfg.bestIpApi, "text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS)
-                .then(parseBestIpList)
-                .catch((e) => { console.error("Error in best IP update:", e); return []; })
-            : null,
-        cfg.autoUpdateProxies && cfg.proxyApi
-            ? fetchTextWithTimeout(cfg.proxyApi, "text/plain,text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS)
-                .then((text) => parseProxyApiList(text, cfg.proxyProtocols))
-                .catch((e) => { console.error("Error in proxy update:", e); return []; })
-            : null,
+        pullList(cfg.autoUpdateBestIp, cfg.bestIpApi, "text/html,application/xhtml+xml,application/xml;", parseBestIpList),
+        pullList(cfg.autoUpdateProxies, cfg.proxyApi, "text/plain,text/html,application/xhtml+xml,application/xml;", (text) => parseProxyApiList(text, cfg.proxyProtocols)),
     ]);
 
     const domains = ips && ips.length ? mergeBestIps(cfg.domains, ips) : null;
@@ -3777,22 +3816,17 @@ async function runAutoUpdate(env, cfg) {
 
 // 订阅请求触发。返回合并后的配置供本次响应用，未更新则返回 null
 async function maybeAutoUpdate(env, cfg) {
+    if (!env || !env.VTPanel) return null;
+    let timer;
     try {
-        if (!env || !env.VTPanel) return null;
         cfg = cfg || (await getUserConfig(env));
         if (!cfg.autoUpdateBestIp && !cfg.autoUpdateProxies) return null;
-        let timer;
         const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), AUTO_MAX_WAIT_MS); });
-        try {
-            return await Promise.race([
-                runAutoUpdate(env, cfg).catch((e) => { console.error("Error in auto update:", e); return null; }),
-                timeout,
-            ]);
-        } finally {
-            clearTimeout(timer);
-        }
+        return await Promise.race([runAutoUpdate(env, cfg), timeout]);
     } catch (e) {
         console.error("Error in auto update:", e);
         return null;
+    } finally {
+        clearTimeout(timer);
     }
 }
