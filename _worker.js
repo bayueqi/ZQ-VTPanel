@@ -171,6 +171,16 @@ function normalizeDomains(arr) {
     return out;
 }
 
+// 把 proxies 归一化成 [{proxy, remark}]，去空（字符串数组旧格式兼容）
+function normalizeProxies(arr) {
+    if (!Array.isArray(arr)) return [];
+    return arr
+        .map((x) => typeof x === "string"
+            ? { proxy: x.trim(), remark: "" }
+            : (x && { proxy: String(x.proxy || "").trim(), remark: String(x.remark || "").trim() }))
+        .filter((x) => x && x.proxy);
+}
+
 // 解析其它代理订阅文本：每行 protocol://[user:pass@]host:port#备注，仅保留所选协议类型的节点
 function parseProxyApiList(text, protocols) {
     const allow = new Set((Array.isArray(protocols) && protocols.length) ? protocols : SUPPORTED_PROXY_PROTOCOLS);
@@ -209,11 +219,14 @@ function splitHostPort(addr) {
     return { host: s, port: 443 };
 }
 
+// 去掉 IPv6 方括号的 host
+const bareHost = (addr) => splitHostPort(addr).host.replace(/^\[|\]$/g, "");
+
+// 去重键：host:port，域名不分大小写，避免 1.2.3.4 与 1.2.3.4:443 生成两个同样的节点
+const bestKey = (addr) => `${bareHost(addr).toLowerCase()}:${splitHostPort(addr).port}`;
+
 // 条目是 IP 还是域名，用于区分「优选IP」「优选域名」
-function isIpHost(addr) {
-    const host = splitHostPort(addr).host.replace(/^\[|\]$/g, "");
-    return IPV4_RE.test(host) || IPV6_RE.test(host);
-}
+const isIpHost = (addr) => { const h = bareHost(addr); return IPV4_RE.test(h) || IPV6_RE.test(h); };
 
 function parseBestIpList(text) {
     const seen = new Set(), out = [];
@@ -223,10 +236,12 @@ function parseBestIpList(text) {
         const hashIdx = raw.indexOf("#");
         const ip = (hashIdx === -1 ? raw : raw.slice(0, hashIdx)).trim();
         const remark = (hashIdx === -1 ? "" : raw.slice(hashIdx + 1)).trim();
-        if (!BEST_HOST_RE.test(ip) || seen.has(ip)) return;
+        if (!BEST_HOST_RE.test(ip)) return;
         const port = splitHostPort(ip).port;
         if (!(port > 0 && port <= 65535)) return;
-        seen.add(ip);
+        const key = bestKey(ip);
+        if (seen.has(key)) return;
+        seen.add(key);
         out.push({ ip, remark });
     };
     for (const line of String(text || "").split(/\r?\n/)) {
@@ -503,9 +518,7 @@ async function getUserConfig(env) {
         if (!Array.isArray(m.proxies)) {
             m.proxies = (typeof m.s5 === "string" && m.s5.trim()) ? [{ proxy: m.s5.trim(), remark: "" }] : [];
         } else {
-            m.proxies = m.proxies
-                .map((x) => typeof x === "string" ? { proxy: x.trim(), remark: "" } : (x && { proxy: String(x.proxy || "").trim(), remark: String(x.remark || "").trim() }))
-                .filter((x) => x && x.proxy);
+            m.proxies = normalizeProxies(m.proxies);
         }
         if (!Array.isArray(m.proxyIps)) {
             m.proxyIps = (typeof m.proxyIp === "string" && m.proxyIp.trim()) ? [m.proxyIp.trim()] : [];
@@ -2659,7 +2672,7 @@ export default {
             if (!(await isPanelAuthed(req, url, userConfig, env))) return json({ error: "请先登录" }, 401);
             
             try {
-                const text = await fetchTextWithTimeout(apiUrl, "text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS);
+                const text = await fetchTextWithTimeout(apiUrl, ACCEPT_HTML, AUTO_FETCH_TIMEOUT_MS);
                 const ips = parseBestIpList(text);
                 if (!ips.length) return json({ success: false, error: "未获取到优选IP/域名" });
                 // 与订阅自动拉取同一套合并逻辑：整批替换「优选」条目，保留手动填写的条目
@@ -2685,7 +2698,7 @@ export default {
             if (!(await isPanelAuthed(req, url, userConfig, env))) return json({ error: "请先登录" }, 401);
             if (!apiUrl) return json({ error: "未配置其它代理 API 地址" }, 400);
             try {
-                const text = await fetchTextWithTimeout(apiUrl, "text/plain,text/html,application/xhtml+xml,application/xml;", AUTO_FETCH_TIMEOUT_MS);
+                const text = await fetchTextWithTimeout(apiUrl, ACCEPT_TEXT, AUTO_FETCH_TIMEOUT_MS);
                 const fresh = parseProxyApiList(text, protocols);
                 if (!fresh.length) return json({ success: false, error: "未获取到其它代理" });
                 // 与订阅自动拉取同一套合并逻辑
@@ -2797,7 +2810,7 @@ export default {
             // 收集所有节点使用的域名（排除纯 IP），用于 ECH nameserver-policy 走 DoH 解析
             const echHosts = [...new Set(
                 [lists.workerHost, ...lists.domains.map((d) => d.ip), ...lists.entries]
-                    .map((s) => splitHostPort(s || "").host.replace(/^\[|\]$/g, ""))
+                    .map((s) => bareHost(s || ""))
                     .filter((h) => h && !isIpHost(h)),
             )];
             const echSni = userConfig.echConfig?.sni || "";
@@ -3691,7 +3704,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						try {
 							var res = await fetch('/api/fetch-best-ip', {
 								method: 'POST', headers: { 'Content-Type': 'application/json' },
-								body: JSON.stringify({ uuid: document.getElementById('uuid').value.trim() || '${userUUID}', apiUrl: document.getElementById('bestIpApi').value.trim(), domains: state.domains.filter(function (x) { return x.first; }).map(function (x) { return { ip: x.first, remark: x.second }; }) })
+								body: JSON.stringify({ apiUrl: document.getElementById('bestIpApi').value.trim(), domains: state.domains.filter(function (x) { return x.first; }).map(function (x) { return { ip: x.first, remark: x.second }; }) })
 							});
 							var result = await res.json();
 							if (result.success && result.domains) {
@@ -3710,7 +3723,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						try {
 							var res = await fetch('/api/fetch-proxies', {
 								method: 'POST', headers: { 'Content-Type': 'application/json' },
-								body: JSON.stringify({ uuid: document.getElementById('uuid').value.trim() || '${userUUID}', apiUrl: document.getElementById('proxyApi').value.trim(), protocols: Array.from(document.querySelectorAll('.proxy-protocol:checked')).map(function (cb) { return cb.value; }), proxies: state.proxies.filter(function (x) { return x.first; }).map(function (x) { return { proxy: x.first, remark: x.second }; }) })
+								body: JSON.stringify({ apiUrl: document.getElementById('proxyApi').value.trim(), protocols: Array.from(document.querySelectorAll('.proxy-protocol:checked')).map(function (cb) { return cb.value; }), proxies: state.proxies.filter(function (x) { return x.first; }).map(function (x) { return { proxy: x.first, remark: x.second }; }) })
 							});
 							var result = await res.json();
 							if (result.success && result.proxies) {
@@ -3738,8 +3751,9 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
     },
 };
 
-const AUTO_MAX_WAIT_MS = 8000;
 const AUTO_FETCH_TIMEOUT_MS = 5000;
+const ACCEPT_HTML = "text/html,application/xhtml+xml,application/xml;";
+const ACCEPT_TEXT = "text/plain,text/html,application/xhtml+xml,application/xml;";
 
 async function fetchTextWithTimeout(url, accept, ms) {
     const controller = new AbortController();
@@ -3775,10 +3789,10 @@ function mergePreferred(current, fresh, keyOf, makeItem) {
 }
 
 const mergeBestIps = (domains, ips) =>
-    mergePreferred(normalizeDomains(domains), ips, (d) => d.ip, (i) => ({ ip: i.ip, remark: isIpHost(i.ip) ? "优选IP" : "优选域名" }));
+    mergePreferred(normalizeDomains(domains), ips, (d) => bestKey(d.ip), (i) => ({ ip: i.ip, remark: isIpHost(i.ip) ? "优选IP" : "优选域名" }));
 
 const mergeProxies = (proxies, fresh) =>
-    mergePreferred(proxies || [], fresh, (p) => p.proxy, (p) => ({ proxy: p.proxy, remark: "优选" + p.remark }));
+    mergePreferred(normalizeProxies(proxies), fresh, (p) => p.proxy, (p) => ({ proxy: p.proxy, remark: "优选" + p.remark }));
 
 // 未勾选或没填地址时返回 null，不发请求；拉取失败返回空数组，不拖累另一个源
 const pullList = (enabled, url, accept, parse) =>
@@ -3790,15 +3804,15 @@ const pullList = (enabled, url, accept, parse) =>
 
 // 拉取优选IP与其它代理并回写配置，返回合并后的配置；没有新内容返回 null
 async function runAutoUpdate(env, cfg) {
-    // 两个源并发拉，串行会把 5+5 秒叠到总超时之外
+    // 两个源并发拉，各自 5 秒超时，最坏也是 5 秒
     const [ips, fresh] = await Promise.all([
-        pullList(cfg.autoUpdateBestIp, cfg.bestIpApi, "text/html,application/xhtml+xml,application/xml;", parseBestIpList),
-        pullList(cfg.autoUpdateProxies, cfg.proxyApi, "text/plain,text/html,application/xhtml+xml,application/xml;", (text) => parseProxyApiList(text, cfg.proxyProtocols)),
+        pullList(cfg.autoUpdateBestIp, cfg.bestIpApi, ACCEPT_HTML, parseBestIpList),
+        pullList(cfg.autoUpdateProxies, cfg.proxyApi, ACCEPT_TEXT, (text) => parseProxyApiList(text, cfg.proxyProtocols)),
     ]);
 
     const domains = ips && ips.length ? mergeBestIps(cfg.domains, ips) : null;
     const proxies = fresh && fresh.length ? mergeProxies(cfg.proxies, fresh) : null;
-    if (!env || !env.VTPanel || (!domains && !proxies)) return null;
+    if (!domains && !proxies) return null;
 
     const merged = configForStore(cfg, {
         domains: domains || cfg.domains,
@@ -3806,25 +3820,21 @@ async function runAutoUpdate(env, cfg) {
     });
     // 内容没有变化就不写 KV，省掉一次无谓的写
     const changed =
-        JSON.stringify(merged.domains) !== JSON.stringify(cfg.domains) ||
-        JSON.stringify(merged.proxies) !== JSON.stringify(cfg.proxies);
-    if (changed) await env.VTPanel.put("user_config", JSON.stringify(merged));
+        JSON.stringify(merged.domains) !== JSON.stringify(normalizeDomains(cfg.domains)) ||
+        JSON.stringify(merged.proxies) !== JSON.stringify(normalizeProxies(cfg.proxies));
+    if (changed && env.VTPanel) await env.VTPanel.put("user_config", JSON.stringify(merged));
     return merged;
 }
 
 // 订阅请求触发。返回合并后的配置供本次响应用，未更新则返回 null
 async function maybeAutoUpdate(env, cfg) {
     if (!env || !env.VTPanel) return null;
-    let timer;
     try {
         cfg = cfg || (await getUserConfig(env));
         if (!cfg.autoUpdateBestIp && !cfg.autoUpdateProxies) return null;
-        const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), AUTO_MAX_WAIT_MS); });
-        return await Promise.race([runAutoUpdate(env, cfg), timeout]);
+        return await runAutoUpdate(env, cfg);
     } catch (e) {
         console.error("Error in auto update:", e);
         return null;
-    } finally {
-        clearTimeout(timer);
     }
 }
