@@ -237,6 +237,19 @@ function splitHostPort(addr) {
 // 去掉 IPv6 方括号的 host
 const bareHost = (addr) => splitHostPort(addr).host.replace(/^\[|\]$/g, "");
 
+// ProxyIP 写法：host / host:port / [ipv6]:port；没带端口时沿用目标的端口
+function splitProxyIp(proxyIp, fallbackPort) {
+    const s = String(proxyIp || "").trim();
+    if (s.startsWith("[")) {
+        const m = s.match(/^\[([^\]]+)\](?::(\d{1,5}))?$/);
+        if (m) return { host: m[1], port: m[2] ? Number(m[2]) : fallbackPort };
+    }
+    const i = s.lastIndexOf(":");
+    if (i > 0 && s.indexOf(":") === i && /^\d{1,5}$/.test(s.slice(i + 1)))
+        return { host: s.slice(0, i), port: Number(s.slice(i + 1)) };
+    return { host: s, port: fallbackPort };
+}
+
 // 去重键：host:port，域名不分大小写，避免 1.2.3.4 与 1.2.3.4:443 生成两个同样的节点
 const bestKey = (addr) => `${bareHost(addr).toLowerCase()}:${splitHostPort(addr).port}`;
 
@@ -2295,7 +2308,7 @@ const connectParallel=async(host,port,payload,order,mode,proxyCfg,proxyIp,getOrd
         try{
             if(type==="direct") return await connectDirect(host,port,payload);
             if(type==="s5"&&proxyCfg) return await tryConnectFn(proxyCfg,host,port,payload);
-            if(type==="proxy"&&proxyIp){const [ph,pp=port]=proxyIp.split(":");return await connectDirect(ph,+pp||port,payload);}
+            if(type==="proxy"&&proxyIp){const p=splitProxyIp(proxyIp,port);return await connectDirect(p.host,p.port,payload);}
         }catch{}return null;
     };
     const tryNext=async(index)=>{if(index>=order.length) return null;const sock=await tryConnect(order[index]);return sock||(await tryNext(index+1));};
@@ -2383,78 +2396,12 @@ async function connectByOrder(head, opts, payload) {
             if (type === "direct") return await connectDirect(head.hostname, head.port, payload);
             if (type === "s5" && opts.proxyConfig) return await connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
             if (type === "proxy" && opts.PROXY_IP) {
-                const [ph, pp = head.port] = opts.PROXY_IP.split(":");
-                return await connectDirect(ph, +pp || head.port, payload);
+                const p = splitProxyIp(opts.PROXY_IP, head.port);
+                return await connectDirect(p.host, p.port, payload);
             }
         } catch {}
     }
     return null;
-}
-
-// 一个 POST 承载上下行：请求体灌进 socket，socket 的可读流直接当响应体吐出去
-async function handleXhttp(req, userConfig, opts) {
-    if (!req.body) return new Response("bad request", { status: 400 });
-    const reader = req.body.getReader();
-    const fail = (status) => {
-        reader.cancel().catch(() => {});
-        return new Response("bad request", { status });
-    };
-
-    // 攒够首包才建连；头部跨 chunk 时 parseXhttpHead 会回 need
-    let buf = new Uint8Array(0), head = { state: "need" };
-    while (head.state === "need") {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value && value.byteLength) buf = buf.byteLength ? concatBytes(buf, value) : new Uint8Array(value);
-        if (buf.byteLength > 16384) return fail(400);
-        head = parseXhttpHead(buf, userConfig.uuid);
-    }
-    // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
-    if (head.state !== "ok" || head.isUDP) return fail(400);
-
-    // 靠首包解出的目标，按 t/d/s/p 决定的顺序逐个试，第一个连上就用它
-    const sock = await connectByOrder(head, opts, buf.subarray(head.offset));
-    if (!sock) return fail(502);
-
-    // 上行：剩下的请求体继续灌进 socket，读完只关写端，不影响下行
-    (async () => {
-        const w = sock.writable.getWriter();
-        try {
-            for (;;) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                if (value && value.byteLength) await w.write(value);
-            }
-        } catch {}
-        try { await w.close(); } catch {}
-    })();
-
-    // 下行：socket 可读流写进响应体。VLESS 要求先回 [版本号, 附加长度]，Trojan 不用
-    const respHead = head.isTrojan ? null : new Uint8Array([0, 0]);
-    const body = new ReadableStream({
-        async start(controller) {
-            if (respHead) controller.enqueue(respHead);
-            const r = sock.readable.getReader();
-            try {
-                for (;;) {
-                    const { done, value } = await r.read();
-                    if (done) break;
-                    if (value && value.byteLength) controller.enqueue(value);
-                }
-            } catch {}
-            try { controller.close(); } catch {}
-        },
-        cancel() { try { sock.close(); } catch {} },
-    });
-
-    return new Response(body, {
-        status: 200,
-        headers: {
-            "content-type": "application/octet-stream",
-            "cache-control": "no-store",
-            "x-accel-buffering": "no",
-        },
-    });
 }
 
 // ---------- gRPC ----------
@@ -2488,6 +2435,23 @@ function grpcUnwrap(payload) {
     return payload;
 }
 
+// gRPC 帧可能一次只来半帧，也可能一个 chunk 里挤着几帧，边收边切
+function grpcSlicer() {
+    let pending = new Uint8Array(0);
+    return (chunk) => {
+        pending = pending.byteLength ? concatBytes(pending, chunk) : new Uint8Array(chunk);
+        const out = [];
+        while (pending.byteLength >= 5) {
+            const len = 5 + (((pending[1] << 24) >>> 0) | (pending[2] << 16) | (pending[3] << 8) | pending[4]);
+            if (pending.byteLength < len) break;
+            const payload = grpcUnwrap(pending.subarray(5, len));
+            pending = pending.subarray(len);
+            if (payload.byteLength) out.push(payload);
+        }
+        return out;
+    };
+}
+
 // gRPC 没有查询串，模式写在路径最后一段：…/d、…/p-<base64url>、…/s-<base64url>
 function grpcRoute(u) {
     const seg = u.pathname.split("/").filter(Boolean).pop() || "";
@@ -2504,74 +2468,87 @@ function grpcRoute(u) {
     return null;
 }
 
-// 一个 POST 之内用 gRPC 帧承载双向流
-async function handleGrpc(req, userConfig, opts) {
+// xhttp 与 gRPC 只差一层外壳：xhttp 是裸字节流，gRPC 每段数据套 5 字节帧头 + protobuf 包装。
+// 上下行都在同一个 POST 里跑：请求体灌进 socket，socket 的可读流当响应体吐出去。
+async function handleTunnel(req, userConfig, opts, mode) {
     if (!req.body) return new Response("bad request", { status: 400 });
+    const isGrpc = mode === "grpc";
     const reader = req.body.getReader();
-    const st = { sock: null, controller: null };
-    const body = new ReadableStream({
-        start(c) { st.controller = c; },
-        cancel() { try { st.sock && st.sock.close(); } catch {} },
-    });
-    const fail = (status) => {
+    const slice = isGrpc ? grpcSlicer() : (chunk) => [chunk];
+    const wrap = isGrpc ? grpcFrame : (chunk) => chunk;
+
+    let sock = null;
+    const reject = (status) => {
         reader.cancel().catch(() => {});
-        try { st.sock && st.sock.close(); } catch {}
-        try { st.controller.close(); } catch {}
+        try { sock && sock.close(); } catch {}
         return new Response("bad request", { status });
     };
 
-    // 下行：读 socket，逐块套帧写进响应体；VLESS 要求先回 [版本号, 附加长度]
-    const pumpDown = async (sock, isTrojan) => {
-        const r = sock.readable.getReader();
+    // 首包可能跨 chunk（gRPC 还跨帧），攒到能解析出目标为止
+    let headBuf = new Uint8Array(0), head = { state: "need" };
+    while (head.state === "need") {
+        let step;
+        try { step = await reader.read(); } catch { break; }
+        if (step.done) break;
+        if (!step.value || !step.value.byteLength) continue;
+        // 同一次读到的后续帧可能已经是正文，解析出目标后仍要并进首包，不能丢
+        let parsed = false;
+        for (const seg of slice(step.value)) {
+            headBuf = headBuf.byteLength ? concatBytes(headBuf, seg) : seg;
+            if (headBuf.byteLength > 16384) return reject(400);
+            if (parsed) continue;
+            head = parseXhttpHead(headBuf, userConfig.uuid);
+            if (head.state !== "need") parsed = true;
+        }
+        if (parsed) break;
+    }
+    // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
+    if (head.state !== "ok" || head.isUDP) return reject(400);
+
+    // 目标由首包解出，按 t/d/s/p 决定的顺序逐个试，第一个连上就用它
+    sock = await connectByOrder(head, opts, headBuf.subarray(head.offset));
+    if (!sock) return reject(502);
+
+    // 下行：socket 可读流套壳后写进响应体；VLESS 要求先回 [版本号, 附加长度]，Trojan 不用
+    const pumpDown = async (controller) => {
         try {
-            if (!isTrojan) st.controller.enqueue(grpcFrame(new Uint8Array([0, 0])));
+            if (!head.isTrojan) controller.enqueue(wrap(new Uint8Array([0, 0])));
+            const r = sock.readable.getReader();
             for (;;) {
                 const { done, value } = await r.read();
                 if (done) break;
-                if (value && value.byteLength) st.controller.enqueue(grpcFrame(value));
+                if (value && value.byteLength) controller.enqueue(wrap(value));
             }
         } catch {}
-        try { st.controller.close(); } catch {}
+        try { controller.close(); } catch {}
+        try { sock.close(); } catch {}
     };
 
-    let pending = new Uint8Array(0), headBuf = new Uint8Array(0), w = null;
-    try {
-        for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (!value || !value.byteLength) continue;
-            pending = pending.byteLength ? concatBytes(pending, value) : new Uint8Array(value);
-            while (pending.byteLength >= 5) {
-                const size = 5 + (((pending[1] << 24) >>> 0) | (pending[2] << 16) | (pending[3] << 8) | pending[4]);
-                if (pending.byteLength < size) break;
-                const payload = grpcUnwrap(pending.subarray(5, size));
-                pending = pending.slice(size);
-                if (!payload.byteLength) continue;
-                if (w) { await w.write(payload); continue; }
-
-                // 还没建连：把解出来的数据攒成首包，够解析了再连
-                headBuf = headBuf.byteLength ? concatBytes(headBuf, payload) : payload;
-                if (headBuf.byteLength > 16384) return fail(400);
-                const head = parseXhttpHead(headBuf, userConfig.uuid);
-                if (head.state === "bad") return fail(400);
-                if (head.state !== "ok") continue;
-                // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
-                if (head.isUDP) return fail(400);
-                st.sock = await connectByOrder(head, opts, headBuf.subarray(head.offset));
-                if (!st.sock) return fail(502);
-                w = st.sock.writable.getWriter();
-                pumpDown(st.sock, head.isTrojan);
+    // 上行：请求体继续灌进 socket，读完只关写端，不影响下行
+    (async () => {
+        let w = null;
+        try {
+            w = sock.writable.getWriter();
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (!value || !value.byteLength) continue;
+                for (const seg of slice(value)) await w.write(seg);
             }
-        }
-    } catch {}
-    try { w && (await w.close()); } catch {}
+        } catch {}
+        try { w && (await w.close()); } catch {}
+    })();
 
-    return new Response(body, {
+    return new Response(new ReadableStream({
+        start(controller) { pumpDown(controller); },
+        cancel() { try { sock.close(); } catch {} },
+    }), {
         status: 200,
         headers: {
-            "content-type": "application/grpc",
-            "grpc-status": "0",
+            "content-type": isGrpc ? "application/grpc" : "application/octet-stream",
+            ...(isGrpc ? { "grpc-status": "0" } : {}),
             "cache-control": "no-store",
+            "x-accel-buffering": "no",
         },
     });
 }
@@ -2844,10 +2821,10 @@ export default {
                                                     rawClientData,
                                                 );
                                             if (type === "proxy" && PROXY_IP) {
-                                                const [ph, pp = port] = PROXY_IP.split(":");
+                                                const p = splitProxyIp(PROXY_IP, port);
                                                 return await connectDirect(
-                                                    ph,
-                                                    +pp || port,
+                                                    p.host,
+                                                    p.port,
                                                     rawClientData,
                                                 );
                                             }
@@ -3014,12 +2991,12 @@ export default {
         if (req.method === "POST" && req.body &&
             (req.headers.get("content-type") || "").toLowerCase().startsWith("application/grpc")) {
             const userConfig = await getUserConfig(env);
-            return await handleGrpc(req, userConfig, grpcRoute(url) || resolveRoute(url));
+            return await handleTunnel(req, userConfig, grpcRoute(url) || resolveRoute(url), "grpc");
         }
 
         // XHTTP：POST 到 paths 里的伪装路径，一个请求同时承载上行和下行
         if (req.method === "POST" && req.body && paths.includes(url.pathname)) {
-            return await handleXhttp(req, await getUserConfig(env), resolveRoute(url));
+            return await handleTunnel(req, await getUserConfig(env), resolveRoute(url), "xhttp");
         }
 
         if (url.pathname === "/api/fetch-best-ip") {
