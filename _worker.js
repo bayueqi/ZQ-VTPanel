@@ -86,6 +86,36 @@ const paths=["/static/js","/assets/img","/api/2024","/cdn/file","/upload/data","
 const paramsMap={t:["m","type","mode"],d:["dir","direct","d"],s:["socks","proxy","s"],p:["ip","proxyip","p"],v:["r","rand","v","id","t"]};
 const getPath=()=>paths[Math.floor(Math.random()*paths.length)];
 const getParam=(key)=>paramsMap[key][Math.floor(Math.random()*paramsMap[key].length)];
+const isTunnelPath=(p)=>paths.some((base)=>p===base||p.startsWith(base+"/"));
+
+// xhttp 混淆：标识头/键由 UUID 派生。客户端把查询串塞进这个请求头，服务端据此认出 xhttp，
+// 顺带挡掉直接照抄路径的扫描器（真客户端的 padding 串长度固定在百位级）
+const xhttpTag=(uuid)=>{
+    const s=String(uuid||DEFAULT_UUID);
+    return [s.slice(1,7),"_"+s.slice(25,31)];
+};
+const xhttpExtra=(uuid)=>{
+    const [header,key]=xhttpTag(uuid);
+    return {xPaddingObfsMode:true,xPaddingMethod:"tokenish",xPaddingPlacement:"queryInHeader",xPaddingHeader:header,xPaddingKey:key};
+};
+const randPad=(n)=>{
+    const chars="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let s="";
+    for(let i=0;i<n;i++) s+=chars[Math.floor(Math.random()*chars.length)];
+    return s;
+};
+// 头里的值是一整个 URL，padding 串在它的查询串里；取不到再退回请求自己的查询串
+const xhttpPadding=(req,header,key)=>{
+    const raw=req.headers.get(header);
+    if(raw){
+        try{
+            const v=new URL(raw,"https://x.invalid").searchParams.get(key);
+            if(v) return v;
+        }catch{}
+        return raw;
+    }
+    return new URL(req.url).searchParams.get(key)||"";
+};
 
 // ----------- 共享常量和工具 -----------
 const DEFAULT_UUID = "ef9d104e-ca0e-4202-ba4b-a0afb969c747";
@@ -465,9 +495,11 @@ function clashTransportHotPatch(clashYaml, { host, byLabel, grpcUA }) {
             return line.replace(/\}$/, `, grpc-opts: {grpc-user-agent: ${JSON.stringify(ua)}}}`);
         }
         if (new RegExp(`network:\\s*${transport}\\b`).test(line)) return line;
+        // mihomo 的 path 按字面值用，query 只会被当成路径的一部分，这里直接去掉
+        const clashPath = transport === "xhttp" ? path.split("?")[0] : path;
         const optsOf = transport === "grpc"
-            ? `grpc-opts: {grpc-service-name: ${JSON.stringify(path)}${ua ? `, grpc-user-agent: ${JSON.stringify(ua)}` : ""}}`
-            : `xhttp-opts: {path: ${JSON.stringify(path)}, host: ${JSON.stringify(host)}, mode: stream-one}`;
+            ? `grpc-opts: {grpc-service-name: ${JSON.stringify(clashPath)}${ua ? `, grpc-user-agent: ${JSON.stringify(ua)}` : ""}}`
+            : `xhttp-opts: {path: ${JSON.stringify(clashPath)}, host: ${JSON.stringify(host)}, mode: stream-one}`;
         if (/network:\s*\w+/.test(line)) {
             return line
                 .replace(/network:\s*\w+/, `network: ${transport}`)
@@ -2470,30 +2502,38 @@ function grpcSlicer() {
     };
 }
 
-// gRPC 没有查询串，模式写在路径最后一段：…/d、…/p-<base64url>、…/s-<base64url>
+// gRPC 没有查询串，模式写在服务名最后一段：…/d、…/p-<base64url>、…/s-<base64url>
+// 客户端实际请求的是 <服务名>/Tun（multi 模式为 /TunMulti），所以要先去掉这个方法名
 function grpcRoute(u) {
-    const seg = u.pathname.split("/").filter(Boolean).pop() || "";
-    if (seg === "d") return { getOrder: () => ["direct"] };
-    if (seg.length > 2 && seg[1] === "-") {
-        const val = b64urlDec(seg.slice(2));
-        if (!val) return null;
-        if (seg[0] === "p") return { PROXY_IP: val, getOrder: () => ["proxy", "direct"] };
-        if (seg[0] === "s") {
-            const cfg = parseProxyAddress(val);
-            if (cfg) return { proxyConfig: cfg, getOrder: () => ["s5"] };
+    const segs = u.pathname.split("/").filter(Boolean);
+    if (/^tun(multi)?$/i.test(segs[segs.length - 1] || "")) segs.pop();
+    for (let i = segs.length - 1; i >= 0; i--) {
+        const seg = segs[i];
+        if (seg === "d") return { getOrder: () => ["direct"] };
+        if (seg.length > 2 && seg[1] === "-") {
+            const val = b64urlDec(seg.slice(2));
+            if (!val) continue;
+            if (seg[0] === "p") return { PROXY_IP: val, getOrder: () => ["proxy", "direct"] };
+            if (seg[0] === "s") {
+                const cfg = parseProxyAddress(val);
+                if (cfg) return { proxyConfig: cfg, getOrder: () => ["s5"] };
+            }
         }
     }
     return null;
 }
 
+// 隧道请求的路由：路径段优先（xhttp 混淆、gRPC 都用这种），老订阅仍然读查询串
+const tunnelRoute=(u)=>grpcRoute(u)||resolveRoute(u);
+
 // xhttp 与 gRPC 只差一层外壳：xhttp 是裸字节流，gRPC 每段数据套 5 字节帧头 + protobuf 包装。
 // 上下行都在同一个 POST 里跑：请求体灌进 socket，socket 的可读流当响应体吐出去。
 async function handleTunnel(req, userConfig, opts, mode) {
     if (!req.body) return new Response("bad request", { status: 400 });
-    const isGrpc = mode === "grpc";
+    let isGrpc = mode === "grpc";
     const reader = req.body.getReader();
-    const slice = isGrpc ? grpcSlicer() : (chunk) => [chunk];
-    const wrap = isGrpc ? grpcFrame : (chunk) => chunk;
+    let slice = isGrpc ? grpcSlicer() : (chunk) => [chunk];
+    let wrap = isGrpc ? grpcFrame : (chunk) => chunk;
 
     let sock = null;
     const reject = (status) => {
@@ -2503,12 +2543,13 @@ async function handleTunnel(req, userConfig, opts, mode) {
     };
 
     // 首包可能跨 chunk（gRPC 还跨帧），攒到能解析出目标为止
-    let headBuf = new Uint8Array(0), head = { state: "need" };
+    let headBuf = new Uint8Array(0), rawBuf = new Uint8Array(0), head = { state: "need" };
     while (head.state === "need") {
         let step;
         try { step = await reader.read(); } catch { break; }
         if (step.done) break;
         if (!step.value || !step.value.byteLength) continue;
+        rawBuf = rawBuf.byteLength ? concatBytes(rawBuf, step.value) : new Uint8Array(step.value);
         // 同一次读到的后续帧可能已经是正文，解析出目标后仍要并进首包，不能丢
         let parsed = false;
         for (const seg of slice(step.value)) {
@@ -2519,6 +2560,20 @@ async function handleTunnel(req, userConfig, opts, mode) {
             if (head.state !== "need") parsed = true;
         }
         if (parsed) break;
+    }
+    // 客户端外壳不一定和路径判定一致（有的 gRPC 不带 /Tun，有的 xhttp 不认 extra），
+    // 首包解不出目标时换另一种外壳再解一次，免得整条链路直接 400
+    if (head.state !== "ok" && rawBuf.byteLength) {
+        const altBuf = isGrpc ? rawBuf
+            : grpcSlicer()(rawBuf).reduce((a, b) => concatBytes(a, b), new Uint8Array(0));
+        const alt = altBuf.byteLength ? parseXhttpHead(altBuf, userConfig.uuid) : { state: "bad" };
+        if (alt.state === "ok" && !alt.isUDP) {
+            isGrpc = !isGrpc;
+            slice = isGrpc ? grpcSlicer() : (chunk) => [chunk];
+            wrap = isGrpc ? grpcFrame : (chunk) => chunk;
+            head = alt;
+            headBuf = altBuf;
+        }
     }
     // 这条链路不承载 UDP，拒掉后客户端会自己回落 TCP
     if (head.state !== "ok" || head.isUDP) return reject(400);
@@ -2557,6 +2612,8 @@ async function handleTunnel(req, userConfig, opts, mode) {
         try { w && (await w.close()); } catch {}
     })();
 
+    // xhttp 回包也带上标识头，回包看着像一个普通 URL，扫描器无从判断这是代理
+    const tag = isGrpc ? null : xhttpTag(userConfig && userConfig.uuid);
     return new Response(new ReadableStream({
         start(controller) { pumpDown(controller); },
         cancel() { try { sock.close(); } catch {} },
@@ -2565,6 +2622,7 @@ async function handleTunnel(req, userConfig, opts, mode) {
         headers: {
             "content-type": isGrpc ? "application/grpc" : "application/octet-stream",
             ...(isGrpc ? { "grpc-status": "0" } : {}),
+            ...(tag ? { [tag[0]]: `https://x.invalid/?${tag[1]}=${randPad(120 + Math.floor(Math.random() * 780))}` } : {}),
             "cache-control": "no-store",
             "x-accel-buffering": "no",
         },
@@ -2584,16 +2642,21 @@ export default {
             return `${getPath()}?${params.join("&")}`;
         };
 
-        // gRPC 没有查询串，模式写进路径最后一段；其余传输沿用上面的查询串写法
+        // 隧道传输（xhttp / gRPC）把回退方式写进路径段：/d、/p-<base64url>、/s-<base64url>
+        // xhttp 开了混淆后查询串会被客户端整段搬进请求头，模式放 query 服务端就取不到了
+        const routeSeg = (p, s) => (p ? "p-" + b64urlEnc(p) : s ? "s-" + b64urlEnc(s) : "d");
         const buildPathFor = (transport, t, d, s, p) =>
             transport === "grpc"
-                ? `${getPath()}/${p ? "p-" + b64urlEnc(p) : s ? "s-" + b64urlEnc(s) : "d"}`
-                : buildPath(t, d, s, p);
+                ? `${getPath()}/${routeSeg(p, s)}`
+                : transport === "xhttp"
+                    ? `${getPath()}/${routeSeg(p, s)}?${getParam("v")}=${randStr()}`
+                    : buildPath(t, d, s, p);
 
         // 传输层参数：ws 走 WebSocket；xhttp 走 stream-one（上下行共用一条 HTTP 流）；grpc 走 gRPC 双向流
         // gRPC 的 mode 只对 Xray 系客户端生效（gun 单流 / multi 多连接复用一条 HTTP/2）
-        const transportQuery = (transport, grpcMode = "gun") =>
-            transport === "xhttp" ? "type=xhttp&mode=stream-one"
+        // xhttp 带 extra：客户端会用头里的标识串走混淆，服务端也靠它区分 xhttp 与 gRPC
+        const transportQuery = (transport, grpcMode = "gun", uuid = "") =>
+            transport === "xhttp" ? `type=xhttp&mode=stream-one&extra=${encodeURIComponent(JSON.stringify(xhttpExtra(uuid)))}`
                 : transport === "grpc" ? `type=grpc&mode=${grpcMode === "multi" ? "multi" : "gun"}`
                     : "type=ws";
         // gRPC 的服务名代替 host/path，其余传输仍然是 host + path
@@ -2603,9 +2666,9 @@ export default {
                 ? `serviceName=${rawPathQuery}&authority=${workerHost}`
                 : `host=${workerHost}&path=${encodeURIComponent(rawPathQuery)}`;
         const buildVlessUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws", grpcMode = "gun") =>
-            `vless://${uuid}@${preferredDomain}:${port}?encryption=none&security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}&fp=chrome#${encodeURIComponent(label || preferredDomain)}`;
+            `vless://${uuid}@${preferredDomain}:${port}?encryption=none&security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode, uuid)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}&fp=chrome#${encodeURIComponent(label || preferredDomain)}`;
         const buildTrojanUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws", grpcMode = "gun") =>
-            `trojan://${uuid}@${preferredDomain}:${port}?security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}#${encodeURIComponent(label || preferredDomain)}`;
+            `trojan://${uuid}@${preferredDomain}:${port}?security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode, uuid)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}#${encodeURIComponent(label || preferredDomain)}`;
 
         // 取 workerHost / 优选IP(domains) / 入口地址(entries)；入口地址为空时用本项目域名
         const getDomains = (request, cfg) => {
@@ -3028,16 +3091,25 @@ export default {
 
         const url = normalizeQueryPath(new URL(req.url));
 
-        // gRPC：客户端带 application/grpc 发起双向流，路径最后一段标识回退方式
-        if (req.method === "POST" && req.body &&
-            (req.headers.get("content-type") || "").toLowerCase().startsWith("application/grpc")) {
+        // XHTTP 与 gRPC 的请求都落在伪装路径下，靠两点区分：
+        // 1) 开了 extra 的 xhttp 客户端会把查询串整段搬进标识头，gRPC 不会；
+        // 2) gRPC 的 :path 固定是 <服务名>/Tun（multi 为 /TunMulti）。
+        // 老订阅的 xhttp 路径就是伪装路径本身、没有子段，也会落到这里。
+        if (req.method === "POST" && req.body && isTunnelPath(url.pathname)) {
             const userConfig = await getUserConfig(env);
-            return await handleTunnel(req, userConfig, grpcRoute(url) || resolveRoute(url), "grpc");
-        }
-
-        // XHTTP：POST 到 paths 里的伪装路径，一个请求同时承载上行和下行
-        if (req.method === "POST" && req.body && paths.includes(url.pathname)) {
-            return await handleTunnel(req, await getUserConfig(env), resolveRoute(url), "xhttp");
+            const [tagHead, tagKey] = xhttpTag(userConfig.uuid);
+            const padding = xhttpPadding(req, tagHead, tagKey);
+            // 真客户端的 padding 串在百位级，太短或过长的一律当扫描
+            if (padding && (padding.length < 64 || padding.length > 4096)) {
+                return new Response("bad request", { status: 400 });
+            }
+            const isGrpcReq = !padding && /\/tun(multi)?$/i.test(url.pathname);
+            return await handleTunnel(
+                req,
+                userConfig,
+                (isGrpcReq ? grpcRoute(url) : tunnelRoute(url)) || resolveRoute(url),
+                isGrpcReq ? "grpc" : "xhttp",
+            );
         }
 
         if (url.pathname === "/api/fetch-best-ip") {
