@@ -70,7 +70,6 @@ function parseTrojanRequest(buffer,pwd){
     return {hasError:false,addressType:at,port:port,hostname:addr,isUDP:isUDP,rawClientData:s5buf.slice(pi+4)};
 }
 
-const text=(c,s=200)=>new Response(c,{status:s,headers:{"content-type":"text/plain; charset=utf-8"}});
 const json=(c,s=200)=>new Response(JSON.stringify(c),{status:s,headers:{"content-type":"application/json; charset=utf-8"}});
 const b64e=(s)=>{const b=new TextEncoder().encode(s);let bin="";for(let i=0;i<b.length;i+=0x8000)bin+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(bin);};
 // gRPC 服务名里放参数的写法用它：URL 安全、无填充
@@ -153,7 +152,7 @@ function normalizeServiceBase(v) {
     return /^https?:\/\/[^\s/]+/i.test(s) ? s : "";
 }
 // 订阅转换配置文件：subconverter 的 config= 参数，仅对 clash 生效
-const SUB_CONFIG_BASE = "https://raw.githubusercontent.com/bayueqi/ZQ-VTPanel/main/";
+const SUB_CONFIG_BASE = "https://raw.githubusercontent.com/bayueqi/ZQ-JKPanel/main/";
 const SUB_CONFIG_PRESETS = [
     ["", "不使用"],
     ["ZQ-AllInOne.ini", "全能版"],
@@ -179,7 +178,6 @@ function configForStore(cfg, overrides = {}) {
         entries: Array.isArray(m.entries) ? m.entries : [],
         proxies: Array.isArray(m.proxies) ? m.proxies : [],
         globalProxy: !!m.globalProxy,
-        fallbackTimeout: m.fallbackTimeout || 100,
         subConvertBase: normalizeServiceBase(m.subConvertBase) || DEFAULT_SUBCONVERTER_BASE,
         subConfig: normalizeSubConfig(m.subConfig),
         bestIpApi: m.bestIpApi || DEFAULT_BEST_IP_API,
@@ -206,7 +204,6 @@ const DEFAULT_CONFIG = {
     entries: [],               // 入口地址：[优选IP 或域名]，空 = 本项目域名
     proxies: [],               // 其它代理：[{proxy, remark}]
     globalProxy: false,        // true 只走其它代理；false 优先直连，失败回退其它代理
-    fallbackTimeout: 100,
     subConvertBase: DEFAULT_SUBCONVERTER_BASE,   // 订阅转换服务（subconverter 根地址）
     subConfig: "",                             // 订阅转换配置文件（仅 clash）
     bestIpApi: DEFAULT_BEST_IP_API, autoUpdateBestIp: false,
@@ -219,27 +216,20 @@ const DEFAULT_CONFIG = {
     ech: false, echConfig: { sni: DEFAULT_ECH_SNI, dns: DEFAULT_ECH_DNS },
 };
 
-// 把 domains 归一化成 [{ip, remark}]，去重去空（字符串数组旧格式兼容）
-function normalizeDomains(arr) {
+// 归一化成 [{<key>, remark}]，去空；domains 顺带去重，proxies 允许重复（同一条可以挂多个入口）
+function normalizeList(arr, key, dedupe) {
     const seen = new Set(), out = [];
-    if (Array.isArray(arr)) for (const x of arr) {
-        const item = typeof x === "string"
-            ? { ip: x.trim(), remark: "" }
-            : (x && { ip: String(x.ip || "").trim(), remark: String(x.remark || "").trim() });
-        if (item && item.ip && !seen.has(item.ip)) { seen.add(item.ip); out.push(item); }
+    if (!Array.isArray(arr)) return out;
+    for (const x of arr) {
+        const v = typeof x === "string" ? x.trim() : String((x && x[key]) || "").trim();
+        if (!v || (dedupe && seen.has(v))) continue;
+        seen.add(v);
+        out.push({ [key]: v, remark: typeof x === "string" ? "" : String((x && x.remark) || "").trim() });
     }
     return out;
 }
-
-// 把 proxies 归一化成 [{proxy, remark}]，去空（字符串数组旧格式兼容）
-function normalizeProxies(arr) {
-    if (!Array.isArray(arr)) return [];
-    return arr
-        .map((x) => typeof x === "string"
-            ? { proxy: x.trim(), remark: "" }
-            : (x && { proxy: String(x.proxy || "").trim(), remark: String(x.remark || "").trim() }))
-        .filter((x) => x && x.proxy);
-}
+const normalizeDomains = (arr) => normalizeList(arr, "ip", true);
+const normalizeProxies = (arr) => normalizeList(arr, "proxy", false);
 
 // 解析其它代理订阅文本：每行 protocol://[user:pass@]host:port#备注，仅保留所选协议类型的节点
 function parseProxyApiList(text, protocols) {
@@ -631,7 +621,7 @@ async function getUserConfig(env) {
     const envBase = normalizeServiceBase(env?.SUBCONVERTER_BASE);
     if (envBase) fallback.subConvertBase = envBase;
     try {
-        const cfg = await env.VTPanel?.get("user_config", "json");
+        const cfg = await env.JKPanel?.get("user_config", "json");
         const m = cfg || {};
         m.domains = normalizeDomains(m.domains);
         // 旧单值迁移：s5 → proxies；proxyIp → proxyIps
@@ -647,9 +637,6 @@ async function getUserConfig(env) {
         }
         m.entries = (Array.isArray(m.entries) ? m.entries : []).map((x) => String(x || "").trim()).filter(Boolean);
         m.globalProxy = !!m.globalProxy;
-        m.fallbackTimeout =
-            typeof m.fallbackTimeout === "number"
-                ? Math.max(1, Math.min(5000, m.fallbackTimeout)) : 100;
         m.bestIpApi = m.bestIpApi || DEFAULT_BEST_IP_API;
         m.subConvertBase = normalizeServiceBase(m.subConvertBase) || fallback.subConvertBase;
         m.subConfig = normalizeSubConfig(m.subConfig);
@@ -2353,7 +2340,7 @@ const connectDirect=async(hostname,portNum,data)=>{
 const connectStreams=async(remoteSocket,webSocket,headerData,retryFunc,userCfg)=>{
     let header=headerData,hasData=false,dataPromiseResolve;
     const dataPromise=new Promise((resolve)=>(dataPromiseResolve=resolve));
-    const timeoutId=setTimeout(()=>{if(!hasData) dataPromiseResolve(false);},userCfg?.fallbackTimeout||100);
+    const timeoutId=setTimeout(()=>{if(!hasData) dataPromiseResolve(false);},100);
     remoteSocket.readable.pipeTo(new WritableStream({
         async write(chunk,controller){
             clearTimeout(timeoutId);hasData=true;dataPromiseResolve(true);
@@ -2484,12 +2471,6 @@ const dial = (make, ms) =>
         );
     });
 
-const waitRead = (reader, ms) =>
-    Promise.race([
-        reader.read().catch(() => ({ done: true })),
-        new Promise((r) => setTimeout(() => r(null), ms)),
-    ]);
-
 const dialerFor = (type, head, opts, payload) => {
     if (type === "direct") return () => connectDirect(head.hostname, head.port, payload);
     if (type === "s5" && opts.proxyConfig) return () => connectViaProxy(opts.proxyConfig, head.hostname, head.port, payload);
@@ -2500,18 +2481,13 @@ const dialerFor = (type, head, opts, payload) => {
     return null;
 };
 
-// 最后一条路没有备选，直接交出去让下行流自己等，不让它白白多等一轮
-async function openRoute(head, opts, payload, waitMs) {
-    const plans = opts.getOrder().map((t) => dialerFor(t, head, opts, payload)).filter(Boolean);
-    for (let i = 0; i < plans.length; i++) {
-        const sock = await dial(plans[i], DIAL_TIMEOUT_MS);
-        if (!sock) continue;
-        const reader = sock.readable.getReader();
-        if (i === plans.length - 1) return { sock, reader, first: null };
-        const step = await waitRead(reader, waitMs);
-        if (step && step.value && step.value.byteLength) return { sock, reader, first: step.value };
-        try { reader.cancel(); } catch {}
-        try { sock.close(); } catch {}
+// 按顺序拨，拨通就用：连不上立刻换下一跳，连上就把流直接交出去，不再等数据
+async function openRoute(head, opts, payload) {
+    for (const type of opts.getOrder()) {
+        const make = dialerFor(type, head, opts, payload);
+        if (!make) continue;
+        const sock = await dial(make, DIAL_TIMEOUT_MS);
+        if (sock) return { sock, reader: sock.readable.getReader() };
     }
     return null;
 }
@@ -2652,10 +2628,8 @@ async function handleTunnel(req, userConfig, opts, mode) {
 
     // 首包里没被头部吃掉的正文，每条候选连接都要原样再发一次
     const payload = headBuf.subarray(head.offset);
-    // 每一跳等首块下行数据的时间：太短healthy 的直连也会被误判，太长又不通的那跳白等
-    const waitMs = Math.max(300, Math.min(5000, userConfig.fallbackTimeout || 100));
     // 握手不等建连：先回响应头，连接和回退都在流里跑
-    const route = openRoute(head, opts, payload, waitMs);
+    const route = openRoute(head, opts, payload);
 
     // 下行走直通管道，写完就出流；普通 ReadableStream 会先把包攒住，首字节出不来
     const pump = makePipe();
@@ -2668,7 +2642,6 @@ async function handleTunnel(req, userConfig, opts, mode) {
             const r = await route;
             if (!r) return;
             sock = r.sock;
-            if (r.first) await put(wrap(r.first));
             for (;;) {
                 const { done, value } = await r.reader.read();
                 if (done) break;
@@ -2749,10 +2722,8 @@ export default {
             transport === "grpc"
                 ? `serviceName=${rawPathQuery.replace(/^\/+/, "")}&authority=${workerHost}`
                 : `host=${workerHost}&path=${encodeURIComponent(rawPathQuery)}`;
-        const buildVlessUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws", grpcMode = "gun") =>
-            `vless://${uuid}@${preferredDomain}:${port}?encryption=none&security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode, uuid)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}&fp=chrome#${encodeURIComponent(label || preferredDomain)}`;
-        const buildTrojanUri = (rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws", grpcMode = "gun") =>
-            `trojan://${uuid}@${preferredDomain}:${port}?security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode, uuid)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}#${encodeURIComponent(label || preferredDomain)}`;
+        const buildUri = (proto, rawPathQuery, uuid, label, workerHost, preferredDomain, port, echParam = "", transport = "ws", grpcMode = "gun") =>
+            `${proto}://${uuid}@${preferredDomain}:${port}?${proto === "vless" ? "encryption=none&" : ""}security=tls&sni=${workerHost}&${transportQuery(transport, grpcMode, uuid)}${echParam}&${pathParam(transport, rawPathQuery, workerHost)}${proto === "vless" ? "&fp=chrome" : ""}#${encodeURIComponent(label || preferredDomain)}`;
 
         // 取 workerHost / 优选IP(domains) / 入口地址(entries)；入口地址为空时用本项目域名
         const getDomains = (request, cfg) => {
@@ -3290,17 +3261,12 @@ export default {
                     if (!proxyIps.length && incoming.proxyIp) proxyIps.push(String(incoming.proxyIp).trim());
                     const entries = (Array.isArray(incoming.entries) ? incoming.entries : [])
                         .map((x) => String(x || "").trim()).filter(Boolean);
-                    const fallbackTimeout =
-                        typeof incoming.fallbackTimeout === "number"
-                            ? Math.max(1, Math.min(5000, incoming.fallbackTimeout))
-                            : 100;
                     const normalized = configForStore(incoming, {
                         uuid: newUUID,
                         domains, proxyIps, entries, proxies,
-                        fallbackTimeout,
                     });
-                    if (env.VTPanel)
-                        await env.VTPanel.put("user_config", JSON.stringify(normalized));
+                    if (env.JKPanel)
+                        await env.JKPanel.put("user_config", JSON.stringify(normalized));
                     cfgCache = null;
                     return json({ success: true, message: "配置保存成功" });
                 } catch {
@@ -3372,12 +3338,12 @@ export default {
                 if (protocols.includes("vless")) {
                     const name = nodeName("V", n.transport, n.label);
                     transportPaths.set(name, { transport: n.transport, path: n.raw });
-                    out.push(buildVlessUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
+                    out.push(buildUri("vless", n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 }
                 if (protocols.includes("trojan")) {
                     const name = nodeName("T", n.transport, n.label);
                     transportPaths.set(name, { transport: n.transport, path: n.raw });
-                    out.push(buildTrojanUri(n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
+                    out.push(buildUri("trojan", n.raw, userConfig.uuid, name, lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 }
             }
             const nodesContent = out.join("\n");
@@ -3410,7 +3376,7 @@ export default {
             const 订阅转换URL = `${转换服务}/sub?${转换参数}`;
             // 透传客户端 UA：subconverter 据此判断客户端能力，固定假 UA 会拿到不匹配的输出
             const clientUA = req.headers.get("User-Agent") || "";
-            const convertUA = /^[\x20-\x7e]{1,200}$/.test(clientUA) ? clientUA : `ZQ-VTPanel/${端点名}`;
+            const convertUA = /^[\x20-\x7e]{1,200}$/.test(clientUA) ? clientUA : `ZQ-JKPanel/${端点名}`;
             try {
                 const response = await fetch(订阅转换URL, {
                     method: "POST",
@@ -3494,8 +3460,8 @@ export default {
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width,initial-scale=1">
-	<title>ZQ-VTPanel</title>
-	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%232563eb%22%2F%3E%3Cstop%20offset%3D%22.55%22%20stop-color%3D%22%233b82f6%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237c3aed%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2215%22%20fill%3D%22url(%23g)%22%2F%3E%3Crect%20x%3D%226.5%22%20y%3D%226.5%22%20width%3D%2251%22%20height%3D%2251%22%20rx%3D%229.5%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-opacity%3D%22.38%22%20stroke-width%3D%221.6%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2241%22%20text-anchor%3D%22middle%22%20font-family%3D%22-apple-system%2CBlinkMacSystemFont%2C'Segoe%20UI'%2CRoboto%2CArial%2Csans-serif%22%20font-size%3D%2225%22%20font-weight%3D%22800%22%20fill%3D%22%23ffffff%22%20letter-spacing%3D%221%22%3EVT%3C%2Ftext%3E%3C%2Fsvg%3E">
+	<title>ZQ-JKPanel</title>
+	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%232563eb%22%2F%3E%3Cstop%20offset%3D%22.55%22%20stop-color%3D%22%233b82f6%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237c3aed%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2215%22%20fill%3D%22url(%23g)%22%2F%3E%3Crect%20x%3D%226.5%22%20y%3D%226.5%22%20width%3D%2251%22%20height%3D%2251%22%20rx%3D%229.5%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-opacity%3D%22.38%22%20stroke-width%3D%221.6%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2241%22%20text-anchor%3D%22middle%22%20font-family%3D%22-apple-system%2CBlinkMacSystemFont%2C'Segoe%20UI'%2CRoboto%2CArial%2Csans-serif%22%20font-size%3D%2225%22%20font-weight%3D%22800%22%20fill%3D%22%23ffffff%22%20letter-spacing%3D%221%22%3EJK%3C%2Ftext%3E%3C%2Fsvg%3E">
 	<style>
 		:root {
 		    --primary: #2563eb;
@@ -3603,7 +3569,7 @@ export default {
 </head>
 <body>
 	<div class="card">
-		<h1>ZQ-VTPanel</h1>
+		<h1>ZQ-JKPanel</h1>
 		<form method="post" action="/">
 			<div class="form-group">
 				<label for="pwd">请输入密码</label>
@@ -3631,9 +3597,9 @@ export default {
             const echParam = buildEchParam(userConfig);
             for (const n of nodes) {
                 if (protocols.includes("vless"))
-                    allNodeUris.push(buildVlessUri(n.raw, userUUID, nodeName("V", n.transport, n.label), lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
+                    allNodeUris.push(buildUri("vless", n.raw, userUUID, nodeName("V", n.transport, n.label), lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
                 if (protocols.includes("trojan"))
-                    allNodeUris.push(buildTrojanUri(n.raw, userUUID, nodeName("T", n.transport, n.label), lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
+                    allNodeUris.push(buildUri("trojan", n.raw, userUUID, nodeName("T", n.transport, n.label), lists.workerHost, n.addr, n.port || 443, echParam, n.transport, userConfig.grpcMode));
             }
             const allNodesJson = JSON.stringify(allNodeUris);
             const html = `
@@ -3642,8 +3608,8 @@ export default {
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width,initial-scale=1">
-	<title>ZQ-VTPanel</title>
-	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%232563eb%22%2F%3E%3Cstop%20offset%3D%22.55%22%20stop-color%3D%22%233b82f6%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237c3aed%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2215%22%20fill%3D%22url(%23g)%22%2F%3E%3Crect%20x%3D%226.5%22%20y%3D%226.5%22%20width%3D%2251%22%20height%3D%2251%22%20rx%3D%229.5%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-opacity%3D%22.38%22%20stroke-width%3D%221.6%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2241%22%20text-anchor%3D%22middle%22%20font-family%3D%22-apple-system%2CBlinkMacSystemFont%2C'Segoe%20UI'%2CRoboto%2CArial%2Csans-serif%22%20font-size%3D%2225%22%20font-weight%3D%22800%22%20fill%3D%22%23ffffff%22%20letter-spacing%3D%221%22%3EVT%3C%2Ftext%3E%3C%2Fsvg%3E">
+	<title>ZQ-JKPanel</title>
+	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%232563eb%22%2F%3E%3Cstop%20offset%3D%22.55%22%20stop-color%3D%22%233b82f6%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237c3aed%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2215%22%20fill%3D%22url(%23g)%22%2F%3E%3Crect%20x%3D%226.5%22%20y%3D%226.5%22%20width%3D%2251%22%20height%3D%2251%22%20rx%3D%229.5%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-opacity%3D%22.38%22%20stroke-width%3D%221.6%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2241%22%20text-anchor%3D%22middle%22%20font-family%3D%22-apple-system%2CBlinkMacSystemFont%2C'Segoe%20UI'%2CRoboto%2CArial%2Csans-serif%22%20font-size%3D%2225%22%20font-weight%3D%22800%22%20fill%3D%22%23ffffff%22%20letter-spacing%3D%221%22%3EJK%3C%2Ftext%3E%3C%2Fsvg%3E">
 	<style>
 	:root{--primary:#2563eb;--primary-light:#3b82f6;--primary-dark:#1d4ed8;--glass:#fff;--glass-strong:#fff;--line:rgba(15,23,42,.08);--text:#1f2937;--muted:#6b7280;--border:rgba(15,23,42,.12);--shadow:0 1px 3px rgba(15,23,42,.05);--shadow-lg:0 2px 12px rgba(15,23,42,.06)}
 *{box-sizing:border-box}
@@ -3778,10 +3744,10 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 <body>
 	<div class="wrap">
 		<div class="header">
-			<h1>ZQ-VTPanel</h1>
+			<h1>ZQ-JKPanel</h1>
 		</div>
 		<div class="topbar">
-			<a href="https://github.com/BAYUEQI/ZQ-VTPanel" target="_blank" rel="nofollow noopener" aria-label="GitHub 项目">
+			<a href="https://github.com/BAYUEQI/ZQ-JKPanel" target="_blank" rel="nofollow noopener" aria-label="GitHub 项目">
 				<svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
 			</a>
 		</div>
@@ -3872,11 +3838,8 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 							</div>
 						</div>
 					</div>
-					<div class="form-group">
-						<label for="fallbackTimeout">回退检测时间</label>
-						<input type="number" id="fallbackTimeout" name="fallbackTimeout" min="1" max="5000" placeholder="默认100毫秒">
-					</div>
 				</div></div>
+
 			</div>
 			<div class="collapse-section">
 				<button type="button" class="collapse-header" data-collapse="node-content"><span class="ch-title"><span class="ch-dot" style="background:#7c3aed"></span>节点配置</span><span class="icon">▼</span></button>
@@ -4190,7 +4153,6 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						originalPassword = cfg.password || '';
 						document.getElementById('uuid').value = cfg.uuid || '';
 						document.getElementById('panelPassword').value = cfg.password || '';
-						document.getElementById('fallbackTimeout').value = cfg.fallbackTimeout || 100;
 						document.getElementById('bestIpApi').value = cfg.bestIpApi || 'https://ipdb.api.030101.xyz/?type=bestcf';
 						document.getElementById('subConvertBase').value = cfg.subConvertBase || '${DEFAULT_SUBCONVERTER_BASE}';
 						var subCfg = cfg.subConfig || '';
@@ -4288,7 +4250,6 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 						entries: state.entries.filter(Boolean),
 						proxies: state.proxies.filter(function (x) { return x.first; }).map(function (x) { return { proxy: x.first, remark: x.second }; }),
 						globalProxy: document.getElementById('globalProxy').checked,
-						fallbackTimeout: parseInt(document.getElementById('fallbackTimeout').value, 10) || 100,
 						bestIpApi: document.getElementById('bestIpApi').value.trim() || 'https://ipdb.api.030101.xyz/?type=bestcf',
 						subConvertBase: subConvertBase,
 						subConfig: subConfig,
@@ -4516,8 +4477,8 @@ async function runAutoUpdate(env, cfg) {
     const changed =
         JSON.stringify(merged.domains) !== JSON.stringify(normalizeDomains(cfg.domains)) ||
         JSON.stringify(merged.proxies) !== JSON.stringify(normalizeProxies(cfg.proxies));
-    if (changed && env.VTPanel) {
-        await env.VTPanel.put("user_config", JSON.stringify(merged));
+    if (changed && env.JKPanel) {
+        await env.JKPanel.put("user_config", JSON.stringify(merged));
         cfgCache = null;
     }
     return merged;
@@ -4525,7 +4486,7 @@ async function runAutoUpdate(env, cfg) {
 
 // 订阅请求触发。返回合并后的配置供本次响应用，未更新则返回 null
 async function maybeAutoUpdate(env, cfg) {
-    if (!env || !env.VTPanel) return null;
+    if (!env || !env.JKPanel) return null;
     try {
         cfg = cfg || (await getUserConfig(env));
         if (!cfg.autoUpdateBestIp && !cfg.autoUpdateProxies) return null;

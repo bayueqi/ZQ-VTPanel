@@ -1,4 +1,4 @@
-# ZQ-VTPanel
+# ZQ-JKPanel
 
 ![界面](src/界面.png)
 
@@ -12,7 +12,7 @@
 - 全局开关：只走代理，或直连失败回退
 - VLESS / Trojan 独立或同时出订阅，自动识别 Clash / Sing-Box / Surge 并调用 subconverter 转换
 - 传输类型 WebSocket / XHTTP / gRPC，可多选，同时出多套节点
-- ECH 加密、回退检测时间、优选IP 与其它代理自动拉取
+- ECH 加密、优选IP 与其它代理自动拉取
 - 密码登录鉴权，路径与参数伪装混淆
 
 ## 部署步骤
@@ -30,24 +30,24 @@
 6. 点击右上角 **保存并部署**
 7. 创建 KV 命名空间：
    - 左侧进入 **存储和数据库**，点击 **KV**
-   - 点击 **创建命名空间**，名称建议：`VTPanel`
+   - 点击 **创建命名空间**，名称建议：`JKPanel`
 8. 在 Worker 详情页绑定 KV：
    - 打开 Worker → **设置** → **变量** → **KV 命名空间绑定** → **添加绑定**
-   - 变量名称：`VTPanel`
+   - 变量名称：`JKPanel`
    - 选择刚创建的 KV 命名空间
    - 点击 **保存**
 9. 绑定自定义域名（注意：不能使用 workers 默认域名）
 
 ### 2. 部署到 Pages
 
-1. [下载 ZIP](https://github.com/bayueqi/ZQ-VTPanel/archive/refs/heads/main.zip)
+1. [下载 ZIP](https://github.com/bayueqi/ZQ-JKPanel/archive/refs/heads/main.zip)
 2. 登录 Cloudflare → **Workers 和 Pages** → **创建应用程序** → 选择 **创建 Pages**
 3. 选择 **直接上传**，上传下载的 ZIP 包，直接保存并部署
 4. 创建 KV 命名空间：
    - 左侧进入 **存储和数据库**，点击 **KV**
-   - 点击 **创建命名空间**，名称建议：`VTPanel`
+   - 点击 **创建命名空间**，名称建议：`JKPanel`
 5. 绑定 KV：进入 Pages 项目 → **设置** → **变量** → **KV 命名空间绑定** → **添加绑定**
-   - 变量名称：`VTPanel`
+   - 变量名称：`JKPanel`
    - 选择已创建的 KV 命名空间
 6. 再次上传 ZIP 包并部署，接着访问域名（可以绑定自定义域名，也可使用 pages 默认域名）
 
@@ -72,7 +72,6 @@
 | 订阅转换服务 | subconverter 服务根地址（ZQ-SubApi 即这一层），留空用内置默认；可用环境变量 `SUBCONVERTER_BASE` 指定 |
 | 订阅转换配置文件 | ACL4SSR 规则预设或自填 `.ini` 地址，仅对 Clash 订阅生效；选「不使用」则用服务端默认规则 |
 | ECH | 加密 SNI 绕过 DNS 污染；「高级」里可改 SNI 与 DoH 地址 |
-| 回退检测时间 | 直连无响应多少毫秒后切换下一通道，默认 100 |
 
 ### 节点配置
 
