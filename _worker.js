@@ -3548,7 +3548,7 @@ input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .help-list{margin:0;padding-left:20px}
 .help-list li{margin-bottom:10px}
 .help-list li::marker{color:var(--primary);font-weight:700}
-.help-tip{display:flex;align-items:center;gap:8px;margin-top:14px;padding:11px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;color:#b91c1c;font-size:13px;font-weight:600}
+.help-tip{display:flex;align-items:center;gap:8px;margin:14px 0 18px;padding:11px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;color:#b91c1c;font-size:13px;font-weight:600}
 .help-tip svg{flex:none}
 .help-link{color:var(--primary);font-weight:600;text-decoration:none;border-bottom:1px solid rgba(37,99,235,.35)}
 .help-link:hover{color:var(--primary-dark);border-bottom-color:var(--primary-dark)}
